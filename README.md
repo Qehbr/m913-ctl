@@ -15,21 +15,28 @@ Reverse-engineered from USB captures of the official Redragon Windows software. 
 - **Polling rate** — 125, 250, 500, or 1000 Hz
 - **Config files** — INI format for saving and sharing configurations
 
-## Requirements
+## Installation
 
-- Linux (tested on Arch, should work on any distro)
-- libusb 1.0
-- CMake 3.15+
-- C++17 compiler (GCC 7+ or Clang 5+)
+### Pre-built binary
 
-## Building
+Download the latest `m913-ctl` from [Releases](../../releases/latest), then:
+
+```bash
+chmod +x m913-ctl
+sudo mv m913-ctl /usr/local/bin/
+```
+
+### Build from source
+
+Requires: Linux, libusb 1.0, CMake 3.15+, C++17 compiler (GCC 7+ or Clang 5+).
 
 ```bash
 sudo apt install libusb-1.0-0-dev cmake build-essential  # Debian/Ubuntu
 sudo pacman -S libusb cmake                               # Arch
 
-cmake -B build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+sudo cp build/m913-ctl /usr/local/bin/
 ```
 
 ## Setup
