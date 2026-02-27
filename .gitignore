@@ -1,0 +1,5 @@
+build/
+*.o
+*.d
+compile_commands.json
+.claude/

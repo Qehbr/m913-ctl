@@ -1,0 +1,7 @@
+# Redragon M913 Impact Elite — udev rule for non-root USB access
+# Install: sudo cp 99-m913.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules
+#          sudo udevadm trigger
+
+# 2.4G wireless receiver (VID 25a7, PID fa07)
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="25a7", ATTRS{idProduct}=="fa07", MODE="0666"
