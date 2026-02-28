@@ -286,7 +286,23 @@ std::vector<Packet> build_button_mapping(
                     if (sc != 0x00) keys.push_back(sc);
                 }
 
-                if (mods == 0x00 && keys.size() == 1) {
+                if (mods != 0x00 && keys.empty()) {
+                    // Modifier-only binding (e.g. just "super"):
+                    // Single packet, same format as plain key but with
+                    // mod-down (0x80) / mod-up (0x40) event types.
+                    Packet sub;
+                    std::copy(kb_key_template, kb_key_template + 17, sub.begin());
+                    sub[3]  = addr_hi;
+                    sub[4]  = addr_lo;
+                    sub[7]  = 0x80;  // modifier down
+                    sub[8]  = mods;
+                    sub[10] = 0x40;  // modifier up
+                    sub[11] = mods;
+                    uint8_t isum = 0x02 + 0x80 + mods + 0x40 + mods;
+                    sub[13] = static_cast<uint8_t>((0x55 - isum) & 0xFF);
+                    sub[16] = compute_checksum(sub);
+                    result.push_back(sub);
+                } else if (mods == 0x00 && keys.size() == 1) {
                     // Plain single key: use the existing single-packet template.
                     Packet sub;
                     std::copy(kb_key_template, kb_key_template + 17, sub.begin());
