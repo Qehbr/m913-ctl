@@ -31,4 +31,4 @@ target_compile_options(m913-ctl PRIVATE
 )
 
 install(TARGETS m913-ctl DESTINATION bin)
-install(FILES udev/99-m913.rules DESTINATION /etc/udev/rules.d)
+install(FILES udev/99-m913.rules DESTINATION lib/udev/rules.d)
