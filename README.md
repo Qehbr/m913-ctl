@@ -17,6 +17,15 @@ Reverse-engineered from USB captures of the official Redragon Windows software. 
 
 ## Installation
 
+### Arch Linux (AUR)
+
+```bash
+yay -S m913-ctl
+# or: paru -S m913-ctl
+```
+
+The udev rule is installed automatically — no extra setup needed.
+
 ### Pre-built binary
 
 Download the latest `m913-ctl` from [Releases](../../releases/latest), then:
