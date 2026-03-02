@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed for git describe --tags
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev cmake build-essential

@@ -170,7 +170,6 @@ All standard keys: `a`–`z`, `0`–`9`, `f1`–`f24`, `enter`, `space`, `tab`, 
 ```bash
 m913-ctl --probe          # show USB interfaces and endpoints
 m913-ctl --listen         # listen for mouse packets (Ctrl+C to stop)
-m913-ctl --dump           # read config from mouse
 m913-ctl --raw-send HEX   # send raw packet for debugging
 ```
 

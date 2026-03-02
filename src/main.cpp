@@ -21,7 +21,7 @@ static void handle_sigint(int) { g_stop = true; }
 // -----------------------------------------------------------------------
 // Version
 // -----------------------------------------------------------------------
-static constexpr const char* VERSION = "1.0.0";
+static constexpr const char* VERSION = APP_VERSION;
 
 // -----------------------------------------------------------------------
 // Help text
@@ -35,9 +35,6 @@ Redragon M913 Impact Elite configuration tool for Linux.
 Options:
   -h, --help               Show this help and exit
   -V, --version            Show version and exit
-
-  -D, --dump               Send a read-config packet and hexdump the
-                           response (best-effort, times out gracefully)
 
   --listen [EP]            Passively listen for packets from the mouse.
                            EP 0x81 = mouse HID (7B), EP 0x82 = config (17B)
@@ -65,9 +62,6 @@ Options:
                            Bytes are zero-padded to 16; checksum is
                            appended as byte 16 automatically.
                            e.g. --raw-send "08 07 00 00 60 08"
-
-  --scan-sub               Probe sub-command bytes (byte[1] = 0x00..0x1f)
-                           with cmd=0x08 and report any 17-byte responses.
 
 Examples:
   m913-ctl --probe
@@ -199,12 +193,10 @@ int main(int argc, char* argv[]) {
     struct option long_opts[] = {
         {"help",         no_argument,       nullptr, 'h'},
         {"version",      no_argument,       nullptr, 'V'},
-        {"dump",         no_argument,       nullptr, 'D'},
         {"listen",          optional_argument, nullptr, 1006},
         {"probe",           no_argument,       nullptr, 1007},
         {"probe-commands",  no_argument,       nullptr, 1008},
         {"raw-send",        required_argument, nullptr, 1009},
-        {"scan-sub",        no_argument,       nullptr, 1010},
         {"config",       required_argument, nullptr, 'c'},
         {"dpi",          required_argument, nullptr, 1001},
         {"led",          required_argument, nullptr, 1002},
@@ -216,11 +208,9 @@ int main(int argc, char* argv[]) {
     };
 
     // ---- collect requested operations ----
-    bool        do_dump           = false;
     bool        do_probe          = false;
     bool        do_listen         = false;
     bool        do_probe_commands = false;
-    bool        do_scan_sub       = false;
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
     std::string raw_send_hex;
@@ -235,7 +225,7 @@ int main(int argc, char* argv[]) {
     uint16_t              polling_rate_arg = 0;  // 0 = not set
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "hVDc:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hVc:", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'h':
             print_help(argv[0]);
@@ -244,10 +234,6 @@ int main(int argc, char* argv[]) {
         case 'V':
             std::cout << "m913-ctl " << VERSION << "\n";
             return 0;
-
-        case 'D':
-            do_dump = true;
-            break;
 
         case 'c':
             config_file = optarg;
@@ -328,10 +314,6 @@ int main(int argc, char* argv[]) {
             raw_send_hex = optarg;
             break;
 
-        case 1010:  // --scan-sub
-            do_scan_sub = true;
-            break;
-
         case 1011: {  // --polling-rate HZ
             try {
                 int r = std::stoi(optarg);
@@ -369,8 +351,8 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- validate that there's something to do ----
-    bool has_work = do_dump || do_probe || do_probe_commands || do_listen ||
-                    do_scan_sub || !raw_send_hex.empty() ||
+    bool has_work = do_probe || do_probe_commands || do_listen ||
+                    !raw_send_hex.empty() ||
                     !config_file.empty() ||
                     !dpi_args.empty() || !led_arg.empty() || !btn_args.empty() ||
                     polling_rate_arg != 0;
@@ -514,43 +496,6 @@ int main(int argc, char* argv[]) {
             std::cout << "Stopped.\n";
         }
 
-        // ---- --scan-sub ----
-        if (do_scan_sub) {
-            std::cout << "=== Scanning sub-commands (cmd=0x08, byte[1]=0x00..0x1f) ===\n\n";
-
-            uint8_t buf[64] = {};
-            for (int sub = 0x00; sub <= 0x1f; ++sub) {
-                Packet pkt{};
-                pkt[0] = 0x08;
-                pkt[1] = static_cast<uint8_t>(sub);
-                pkt[M913_PACKET_SIZE - 1] = compute_checksum(pkt);
-
-                std::cout << "sub=0x" << std::hex << std::setw(2) << std::setfill('0')
-                          << sub << std::dec << "  ";
-                std::cout.flush();
-
-                try {
-                    mouse.send(pkt.data());
-                } catch (const std::exception& e) {
-                    std::cout << "SEND ERROR: " << e.what() << "\n";
-                    continue;
-                }
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                int got = mouse.try_recv(buf, sizeof(buf), INTERRUPT_EP_IN, 500);
-                if (got > 0) {
-                    std::cout << "RESPONSE (" << got << "B): ";
-                    std::cout << std::hex << std::setfill('0');
-                    for (int b = 0; b < got; ++b)
-                        std::cout << std::setw(2) << static_cast<int>(buf[b]) << " ";
-                    std::cout << std::dec << "  *** HIT ***\n";
-                } else {
-                    std::cout << "no response\n";
-                }
-            }
-            std::cout << "\nDone.\n";
-        }
-
         // ---- --listen ----
         if (do_listen) {
             std::signal(SIGINT, handle_sigint);
@@ -590,30 +535,6 @@ int main(int argc, char* argv[]) {
                 }
             }
             std::cout << "\nStopped.\n";
-        }
-
-        // ---- --dump ----
-        if (do_dump) {
-            std::cout << "=== Read config dump ===\n";
-            // The M913 doesn't respond to arbitrary read commands.
-            // Send a neutral 0x08 packet and capture any spontaneous response.
-            Packet p{};
-            p[0] = 0x08;
-            p[16] = compute_checksum(p);
-            std::cout << "Sending: ";
-            hexdump_packet(p);
-            mouse.send(p.data());
-            uint8_t buf[64] = {};
-            int got = mouse.try_recv(buf, sizeof(buf), INTERRUPT_EP_IN, 2000);
-            if (got > 0) {
-                std::cout << "Response (" << got << "B): ";
-                std::cout << std::hex << std::setfill('0');
-                for (int b = 0; b < got; ++b)
-                    std::cout << std::setw(2) << static_cast<int>(buf[b]) << " ";
-                std::cout << std::dec << "\n";
-            } else {
-                std::cout << "No response (timeout). Try --listen instead.\n";
-            }
         }
 
         // ---- --config FILE ----
