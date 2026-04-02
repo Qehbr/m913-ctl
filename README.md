@@ -15,6 +15,12 @@ Reverse-engineered from USB captures of the official Redragon Windows software. 
 - **Polling rate** — 125, 250, 500, or 1000 Hz
 - **Config files** — INI format for saving and sharing configurations
 
+## GUI
+
+If you prefer a visual interface over the command line, you can use [m913-ctl-gui](https://github.com/brunofin/m913-ctl-gui) by **brunofin**. 
+
+> **Note:** This is a graphical wrapper and **requires `m913-ctl` to be installed** from this repository first. The GUI uses this CLI tool as its backend to communicate with the mouse.
+
 ## Installation
 
 ### Arch Linux (AUR)
