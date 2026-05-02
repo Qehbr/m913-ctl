@@ -364,9 +364,14 @@ int main(int argc, char* argv[]) {
     // ---- open mouse ----
     UsbMouse mouse;
     try {
-        std::cout << "Opening M913 (25a7:fa07)...\n";
-        mouse.open();
-        std::cout << "Connected.\n";
+        uint16_t pid = M913_PID;
+        try {
+            mouse.open(M913_VID, M913_PID);
+        } catch (const std::exception&) {
+            mouse.open(M913_VID, M913_PID_WIRED);
+            pid = M913_PID_WIRED;
+        }
+        std::cout << "Connected (25a7:" << std::hex << pid << std::dec << ").\n";
 
         // Drain any spontaneous init/hello packet from the wireless device.
         uint8_t init_buf[64] = {};

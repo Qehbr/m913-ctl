@@ -7,8 +7,9 @@
 #include <libusb.h>
 
 // Redragon M913 USB identifiers
-static constexpr uint16_t M913_VID = 0x25a7;
-static constexpr uint16_t M913_PID = 0xfa07;   // 2.4G wireless receiver
+static constexpr uint16_t M913_VID       = 0x25a7;
+static constexpr uint16_t M913_PID       = 0xfa07;  // 2.4G wireless receiver
+static constexpr uint16_t M913_PID_WIRED = 0xfa08;  // wired / dual-mode USB
 
 // Packet size for all M913 control/interrupt transfers
 static constexpr int M913_PACKET_SIZE = 17;

@@ -1,6 +1,6 @@
 # m913-ctl
 
-Linux configuration tool for the **Redragon M913 Impact Elite** wireless mouse (USB VID `25a7`, PID `fa07`).
+Linux configuration tool for the **Redragon M913 Impact Elite** wireless mouse. Works in both wireless (2.4G receiver, `25a7:fa07`) and wired (`25a7:fa08`) modes.
 
 Reverse-engineered from USB captures of the official Redragon Windows software. No Windows required.
 
@@ -49,19 +49,9 @@ Requires: Linux, libusb 1.0, CMake 3.15+, C++17 compiler (GCC 7+ or Clang 5+).
 sudo apt install libusb-1.0-0-dev cmake build-essential  # Debian/Ubuntu
 sudo pacman -S libusb cmake                               # Arch
 
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build
-sudo cp build/m913-ctl /usr/local/bin/
-```
-
-## Setup
-
-Install the udev rule for non-root USB access:
-
-```bash
-sudo cp udev/99-m913.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo cmake --install build
 ```
 
 ## Usage
