@@ -69,8 +69,8 @@ sudo udevadm trigger
 ### Command line
 
 ```bash
-# Remap buttons
-m913-ctl --button side1=f1 --button side2=ctrl+c
+# Remap buttons — all remapped buttons must be in one command
+m913-ctl --button side1=ctrl+1 --button side4=ctrl+4
 
 # Set DPI
 m913-ctl --dpi 1=800 --dpi 2=1600 --dpi 3=3200
@@ -90,6 +90,8 @@ m913-ctl --config examples/example.ini
 # List all valid action names
 m913-ctl --list-actions
 ```
+
+> **Note:** Each invocation sends a complete button mapping to the mouse — buttons not mentioned are reset to their defaults. To remap multiple buttons, pass all `--button` flags in a single command. For a full persistent setup, use a config file.
 
 ### Config file
 
