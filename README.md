@@ -41,6 +41,14 @@ chmod +x m913-ctl
 sudo mv m913-ctl /usr/local/bin/
 ```
 
+Also download `99-m913.rules` from the same release and install it for non-root USB access:
+
+```bash
+sudo mv 99-m913.rules /usr/lib/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
 ### Build from source
 
 Requires: Linux, libusb 1.0, CMake 3.15+, C++17 compiler (GCC 7+ or Clang 5+).

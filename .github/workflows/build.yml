@@ -30,6 +30,12 @@ jobs:
           name: m913-ctl-linux-x86_64
           path: build/m913-ctl
 
+      - name: Upload udev rule
+        uses: actions/upload-artifact@v4
+        with:
+          name: 99-m913.rules
+          path: udev/99-m913.rules
+
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
@@ -42,6 +48,11 @@ jobs:
         with:
           name: m913-ctl-linux-x86_64
 
+      - name: Download udev rule
+        uses: actions/download-artifact@v4
+        with:
+          name: 99-m913.rules
+
       - name: Make binary executable
         run: chmod +x m913-ctl
 
@@ -49,4 +60,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: m913-ctl
+          files: |
+            m913-ctl
+            99-m913.rules
