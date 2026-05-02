@@ -30,7 +30,7 @@ yay -S m913-ctl
 # or: paru -S m913-ctl
 ```
 
-The udev rule is installed automatically — no extra setup needed.
+The udev rule is installed automatically. After installation, **replug the mouse receiver** (or run `sudo udevadm trigger`) for the rule to take effect.
 
 ### Pre-built binary
 
