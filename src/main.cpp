@@ -5,10 +5,13 @@
 #include <getopt.h>
 #include <iomanip>
 #include <iostream>
+#include <atomic>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "config.h"
 #include "data.h"
@@ -197,6 +200,7 @@ int main(int argc, char* argv[]) {
         {"probe",           no_argument,       nullptr, 1007},
         {"probe-commands",  no_argument,       nullptr, 1008},
         {"raw-send",        required_argument, nullptr, 1009},
+        {"debug-device",    no_argument,       nullptr, 1010},
         {"config",       required_argument, nullptr, 'c'},
         {"dpi",          required_argument, nullptr, 1001},
         {"led",          required_argument, nullptr, 1002},
@@ -211,6 +215,7 @@ int main(int argc, char* argv[]) {
     bool        do_probe          = false;
     bool        do_listen         = false;
     bool        do_probe_commands = false;
+    bool        do_debug_device   = false;
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
     std::string raw_send_hex;
@@ -314,6 +319,10 @@ int main(int argc, char* argv[]) {
             raw_send_hex = optarg;
             break;
 
+        case 1010:  // --debug-device
+            do_debug_device = true;
+            break;
+
         case 1011: {  // --polling-rate HZ
             try {
                 int r = std::stoi(optarg);
@@ -351,13 +360,119 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- validate that there's something to do ----
-    bool has_work = do_probe || do_probe_commands || do_listen ||
+    bool has_work = do_probe || do_probe_commands || do_listen || do_debug_device ||
                     !raw_send_hex.empty() ||
                     !config_file.empty() ||
                     !dpi_args.empty() || !led_arg.empty() || !btn_args.empty() ||
                     polling_rate_arg != 0;
     if (!has_work) {
         print_help(argv[0]);
+        return 0;
+    }
+
+    // ---- --debug-device: investigate unknown/new hardware ----
+    if (do_debug_device) {
+        // Known VID/PID combinations to try, in order.
+        const std::vector<std::pair<uint16_t,uint16_t>> candidates = {
+            {M913_VID,   M913_PID},
+            {M913_VID,   M913_PID_WIRED},
+            {COMPX_VID,  COMPX_PID},
+            {COMPX_VID,  COMPX_PID_WIRED},
+        };
+
+        UsbMouse dbg;
+        uint16_t found_vid = 0, found_pid = 0;
+        for (auto [vid, pid] : candidates) {
+            try {
+                dbg.open_all_interfaces(vid, pid);
+                found_vid = vid; found_pid = pid;
+                break;
+            } catch (...) {}
+        }
+        if (!dbg.is_open()) {
+            std::cerr << "Error: no known M913 variant found. Is the mouse plugged in?\n";
+            return 1;
+        }
+        std::cout << "=== debug-device ===\n";
+        std::cout << "Connected (" << std::hex
+                  << std::setw(4) << std::setfill('0') << found_vid << ":"
+                  << std::setw(4) << std::setfill('0') << found_pid
+                  << std::dec << ").\n\n";
+
+        std::cout << "--- USB descriptor ---\n";
+        dbg.probe();
+        std::cout << "\n";
+
+        // Listen on all 3 possible endpoints simultaneously for 15 seconds.
+        // The user should press all buttons during this time.
+        const std::vector<uint8_t> endpoints = {0x81, 0x82, 0x83};
+        std::cout << "--- Listening on all endpoints for 15 seconds ---\n";
+        std::cout << "Press every mouse button now...\n\n";
+
+        std::mutex print_mtx;
+        std::atomic<bool> dbg_stop{false};
+        std::vector<std::thread> listeners;
+
+        for (uint8_t ep : endpoints) {
+            listeners.emplace_back([&dbg, ep, &print_mtx, &dbg_stop]() {
+                uint8_t buf[64] = {};
+                while (!dbg_stop) {
+                    int got = 0;
+                    try { got = dbg.try_recv(buf, sizeof(buf), ep, 200); }
+                    catch (...) { break; }
+                    if (got > 0) {
+                        std::lock_guard<std::mutex> lk(print_mtx);
+                        std::cout << "EP 0x" << std::hex << std::setw(2)
+                                  << std::setfill('0') << static_cast<int>(ep)
+                                  << " (" << std::dec << got << "B): ";
+                        std::cout << std::hex << std::setfill('0');
+                        for (int i = 0; i < got; ++i)
+                            std::cout << std::setw(2) << static_cast<int>(buf[i]) << " ";
+                        std::cout << std::dec << "\n";
+                    }
+                }
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(15));
+        dbg_stop = true;
+        for (auto& t : listeners) t.join();
+
+        // Send the 0x08 profile-query packet and report the response.
+        std::cout << "\n--- Sending 0x08 probe packet (profile query) ---\n";
+        static const uint8_t probe_pkt[17] = {
+            0x08,0x07,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4b
+        };
+        try {
+            dbg.send(probe_pkt);
+            std::cout << "Sent: ";
+            std::cout << std::hex << std::setfill('0');
+            for (int i = 0; i < 17; ++i)
+                std::cout << std::setw(2) << static_cast<int>(probe_pkt[i]) << " ";
+            std::cout << std::dec << "\n";
+
+            // Try to receive a response on each endpoint.
+            for (uint8_t ep : endpoints) {
+                uint8_t resp[64] = {};
+                int got = dbg.try_recv(resp, sizeof(resp), ep, 500);
+                if (got > 0) {
+                    std::cout << "Response on EP 0x" << std::hex
+                              << std::setw(2) << std::setfill('0')
+                              << static_cast<int>(ep)
+                              << " (" << std::dec << got << "B): ";
+                    std::cout << std::hex << std::setfill('0');
+                    for (int i = 0; i < got; ++i)
+                        std::cout << std::setw(2) << static_cast<int>(resp[i]) << " ";
+                    std::cout << std::dec << "\n";
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cout << "Send failed: " << e.what() << "\n";
+            std::cout << "(This may mean the protocol or interface index is different)\n";
+        }
+
+        std::cout << "\n--- Done. Please share the full output above. ---\n";
         return 0;
     }
 
