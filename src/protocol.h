@@ -100,14 +100,23 @@ void clear_multikey_actions();
 //     prepended and {0x05,0x00,0x00,0x50} is used in the mapping packet.
 //
 // Buttons NOT in `changes` keep their factory-default actions.
+// Button index layout for Compx hardware (VID 3554).
+// layout[button_enum_value] = protocol_index
+extern const uint8_t COMPX_LAYOUT[16];
+
+// layout: optional translation table (button enum value → protocol index).
+//         Pass nullptr for Areson hardware (identity mapping).
 std::vector<Packet> build_button_mapping(
-    const std::map<uint8_t, ActionBytes>& changes);
+    const std::map<uint8_t, ActionBytes>& changes,
+    const uint8_t* layout = nullptr);
 
 // DPI settings for build_dpi_packets.
 // value == 0 → keep the template default for that slot.
 struct DpiSettings {
     std::array<uint16_t, 5> values  = {0, 0, 0, 0, 0};
     std::array<bool,     5> enabled = {true, true, true, true, true};
+    // Per-slot RGB colors for Compx hardware (0xFFFFFFFF = not set / use default)
+    std::array<uint32_t, 5> colors  = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
 };
 
 // Build the complete DPI packet sequence (4 DPI config packets +
@@ -125,6 +134,21 @@ std::vector<Packet> build_led_packets(LedMode mode,
 // Build the polling rate configuration packet (1 packet).
 // hz: one of 125, 250, 500, 1000 (values are rounded down to nearest valid rate)
 Packet build_polling_rate_packet(uint16_t hz);
+
+// -----------------------------------------------------------------------
+// Compx hardware (VID 3554) — different DPI and LED protocol
+// -----------------------------------------------------------------------
+
+// Build DPI packets for Compx hardware.
+// DPI values must be multiples of 50 in range 50–12750.
+// Values of 0 for a slot leave that slot unchanged.
+std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi);
+
+// Build per-slot color packets for Compx hardware.
+// colors[5]: one 0xRRGGBB per slot; 0x000000 = LED off for that slot.
+//            0xFFFFFFFF = skip this slot (no packet sent).
+// n_slots: number of active DPI slots (1–5).
+std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots);
 
 // -----------------------------------------------------------------------
 // Helpers

@@ -150,10 +150,11 @@ Config parse_config_file(const std::string& path) {
             std::string value = trim(m[2].str());
 
             if (section == "dpi") {
-                // dpiN=VALUE or dpiN_enable=0/1
+                // dpiN=VALUE or dpiN_enable=0/1 or dpiN_color=RRGGBB
                 std::smatch dm;
                 std::regex re_dpi_val(R"(^dpi([1-5])$)");
                 std::regex re_dpi_ena(R"(^dpi([1-5])_enable$)");
+                std::regex re_dpi_col(R"(^dpi([1-5])_color$)");
 
                 if (std::regex_match(key, dm, re_dpi_val)) {
                     int slot = std::stoi(dm[1].str()) - 1;
@@ -168,6 +169,12 @@ Config parse_config_file(const std::string& path) {
                 } else if (std::regex_match(key, dm, re_dpi_ena)) {
                     int slot = std::stoi(dm[1].str()) - 1;
                     cfg.dpi[slot].enabled = (value != "0");
+                } else if (std::regex_match(key, dm, re_dpi_col)) {
+                    int slot = std::stoi(dm[1].str()) - 1;
+                    if (!parse_color(value, cfg.dpi[slot].color))
+                        throw std::runtime_error(
+                            "Invalid color '" + value + "' at line " +
+                            std::to_string(lineno));
                 }
                 // Unknown dpi keys are silently ignored
 

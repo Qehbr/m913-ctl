@@ -6,10 +6,15 @@
 
 #include <libusb.h>
 
-// Redragon M913 USB identifiers
+// Redragon M913 USB identifiers — original hardware (Areson, VID 25a7)
 static constexpr uint16_t M913_VID       = 0x25a7;
 static constexpr uint16_t M913_PID       = 0xfa07;  // 2.4G wireless receiver
 static constexpr uint16_t M913_PID_WIRED = 0xfa08;  // wired / dual-mode USB
+
+// Redragon M913 newer hardware (Compx, VID 3554)
+static constexpr uint16_t COMPX_VID       = 0x3554;
+static constexpr uint16_t COMPX_PID       = 0xf55d;  // 2.4G wireless receiver
+static constexpr uint16_t COMPX_PID_WIRED = 0xf55e;  // wired / 3-mode USB
 
 // Packet size for all M913 control/interrupt transfers
 static constexpr int M913_PACKET_SIZE = 17;
@@ -37,6 +42,13 @@ public:
 
     // Open the mouse by VID/PID (detaches kernel driver automatically)
     void open(uint16_t vid = M913_VID, uint16_t pid = M913_PID);
+
+    // Open and claim all interfaces found on the device (for debug/investigation)
+    void open_all_interfaces(uint16_t vid, uint16_t pid);
+
+    // Override the HID report type used in SET_REPORT control transfers.
+    // Areson hardware: 0x0308 (feature report). Compx hardware: 0x0208 (output report).
+    void set_ctrl_value(uint16_t v) { _ctrl_value = v; }
 
     // Close and reattach kernel driver
     void close();
@@ -67,8 +79,11 @@ private:
     libusb_context*       _ctx    = nullptr;
     libusb_device_handle* _handle = nullptr;
 
-    bool _detached_iface0 = false;
-    bool _detached_iface1 = false;
+    bool     _detached_iface0 = false;
+    bool     _detached_iface1 = false;
+    bool     _detached_iface2 = false;
+    int      _num_interfaces   = 2;
+    uint16_t _ctrl_value       = CTRL_VALUE;
 
     void _claim_interface(int iface, bool& detached_flag);
     void _release_interface(int iface, bool detached_flag);

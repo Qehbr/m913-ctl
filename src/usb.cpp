@@ -47,9 +47,39 @@ void UsbMouse::close() {
 
     _release_interface(0, _detached_iface0);
     _release_interface(1, _detached_iface1);
+    if (_num_interfaces > 2)
+        _release_interface(2, _detached_iface2);
 
     libusb_close(_handle);
     _handle = nullptr;
+}
+
+void UsbMouse::open_all_interfaces(uint16_t vid, uint16_t pid) {
+    _handle = libusb_open_device_with_vid_pid(_ctx, vid, pid);
+    if (!_handle) {
+        throw std::runtime_error(
+            "Could not find or open device " +
+            [&]() {
+                std::ostringstream ss;
+                ss << std::hex << std::setw(4) << std::setfill('0') << vid
+                   << ":" << std::setw(4) << std::setfill('0') << pid;
+                return ss.str();
+            }() +
+            " — is the mouse plugged in? Try running with sudo.");
+    }
+
+    // Discover how many interfaces the device has, then claim all of them.
+    libusb_device* dev = libusb_get_device(_handle);
+    libusb_config_descriptor* cfg = nullptr;
+    if (libusb_get_active_config_descriptor(dev, &cfg) == 0) {
+        _num_interfaces = cfg->bNumInterfaces;
+        libusb_free_config_descriptor(cfg);
+    }
+
+    _claim_interface(0, _detached_iface0);
+    _claim_interface(1, _detached_iface1);
+    if (_num_interfaces > 2)
+        _claim_interface(2, _detached_iface2);
 }
 
 void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
@@ -62,7 +92,7 @@ void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
         _handle,
         CTRL_REQUEST_TYPE,
         CTRL_REQUEST,
-        CTRL_VALUE,
+        _ctrl_value,
         CTRL_INDEX,
         buf,
         M913_PACKET_SIZE,

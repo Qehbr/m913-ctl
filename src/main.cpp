@@ -1,4 +1,3 @@
-#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -8,7 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
+#include <vector>
 
 #include "config.h"
 #include "data.h"
@@ -75,7 +74,7 @@ Examples:
   m913-ctl --button side5="ctrl+c" --button side6="a+b"  # key combinations
 
 Note: Run as root or install the udev rule for non-root access:
-  sudo cp udev/99-m913.rules /etc/udev/rules.d/
+  sudo cp udev/99-m913.rules /usr/lib/udev/rules.d/
   sudo udevadm control --reload-rules && sudo udevadm trigger
 )";
 }
@@ -127,7 +126,9 @@ static void send_sequence(UsbMouse& mouse,
 // -----------------------------------------------------------------------
 // Apply a full config to the mouse
 // -----------------------------------------------------------------------
-static void apply_config(UsbMouse& mouse, const Config& cfg) {
+static void apply_config(UsbMouse& mouse, const Config& cfg,
+                         const uint8_t* btn_layout = nullptr,
+                         bool is_compx = false) {
 
     // ---- Buttons ----
     std::map<uint8_t, ActionBytes> btn_changes;
@@ -150,7 +151,7 @@ static void apply_config(UsbMouse& mouse, const Config& cfg) {
         }
     }
     if (!btn_changes.empty())
-        send_sequence(mouse, build_button_mapping(btn_changes), "Button mapping");
+        send_sequence(mouse, build_button_mapping(btn_changes, btn_layout), "Button mapping");
 
     // ---- DPI ----
     bool any_dpi = false;
@@ -163,14 +164,41 @@ static void apply_config(UsbMouse& mouse, const Config& cfg) {
             dpi.values[i]  = cfg.dpi[i].value;
             dpi.enabled[i] = cfg.dpi[i].enabled;
         }
-        send_sequence(mouse, build_dpi_packets(dpi), "DPI config");
+        if (is_compx)
+            send_sequence(mouse, build_compx_dpi_packets(dpi), "DPI config");
+        else
+            send_sequence(mouse, build_dpi_packets(dpi), "DPI config");
     }
 
     // ---- LED ----
-    if (cfg.led.set)
+    if (is_compx) {
+        // Compx has per-slot RGB colors, no global LED modes.
+        //   [led] section    → applies one color to every active slot
+        //                       (mode=off → black)
+        //   dpiN_color keys  → override individual slots, take precedence
+        bool any_color = cfg.led.set;
+        for (int i = 0; i < 5; ++i)
+            if (cfg.dpi[i].color != 0xFFFFFFFF) any_color = true;
+
+        if (any_color) {
+            int n_slots = 1;
+            for (int i = 0; i < 5; ++i)
+                if (cfg.dpi[i].enabled) n_slots = i + 1;
+
+            uint32_t colors[5];
+            uint32_t global = cfg.led.set
+                ? ((cfg.led.mode == LedMode::Off) ? 0x000000 : cfg.led.color)
+                : 0xFFFFFFFF;
+            for (int i = 0; i < 5; ++i)
+                colors[i] = (cfg.dpi[i].color != 0xFFFFFFFF) ? cfg.dpi[i].color : global;
+
+            send_sequence(mouse, build_compx_color_packets(colors, n_slots), "LED color");
+        }
+    } else if (cfg.led.set) {
         send_sequence(mouse,
                       build_led_packets(cfg.led.mode, cfg.led.color, cfg.led.brightness, cfg.led.speed),
                       "LED mode");
+    }
 
     // ---- Polling rate ----
     if (cfg.mouse.set)
@@ -363,16 +391,34 @@ int main(int argc, char* argv[]) {
 
     // ---- open mouse ----
     UsbMouse mouse;
+    const uint8_t* btn_layout = nullptr;
+    bool           is_compx   = false;
     try {
-        uint16_t pid = M913_PID;
-        try {
-            mouse.open(M913_VID, M913_PID);
-        } catch (const std::exception&) {
-            mouse.open(M913_VID, M913_PID_WIRED);
-            pid = M913_PID_WIRED;
+        uint16_t vid = M913_VID, pid = M913_PID;
+        const std::vector<std::pair<uint16_t,uint16_t>> candidates = {
+            {M913_VID,  M913_PID},
+            {M913_VID,  M913_PID_WIRED},
+            {COMPX_VID, COMPX_PID},
+            {COMPX_VID, COMPX_PID_WIRED},
+        };
+        bool opened = false;
+        for (auto [v, p] : candidates) {
+            try {
+                mouse.open_all_interfaces(v, p);
+                vid = v; pid = p; opened = true;
+                break;
+            } catch (...) {}
         }
+        if (!opened)
+            throw std::runtime_error("Could not find any supported M913 variant — is the mouse plugged in? Try running with sudo or install the udev rule.");
+
+        is_compx   = (vid == COMPX_VID);
+        btn_layout = is_compx ? COMPX_LAYOUT : nullptr;
+        if (is_compx)
+            mouse.set_ctrl_value(0x0208);  // Compx uses output report, not feature report
+
         std::cout << "Connected (" << std::hex
-                  << std::setw(4) << std::setfill('0') << M913_VID << ":"
+                  << std::setw(4) << std::setfill('0') << vid << ":"
                   << std::setw(4) << std::setfill('0') << pid
                   << std::dec << ").\n";
 
@@ -553,7 +599,7 @@ int main(int argc, char* argv[]) {
             Config cfg = parse_config_file(config_file);
             cfg.profile = profile;
             validate_config(cfg);
-            apply_config(mouse, cfg);
+            apply_config(mouse, cfg, btn_layout, is_compx);
             did_config = true;
         }
 
@@ -564,7 +610,10 @@ int main(int argc, char* argv[]) {
                 if (slot >= 1 && slot <= 5)
                     dpi.values[slot - 1] = val;
             }
-            send_sequence(mouse, build_dpi_packets(dpi), "DPI config");
+            if (is_compx)
+                send_sequence(mouse, build_compx_dpi_packets(dpi), "DPI config");
+            else
+                send_sequence(mouse, build_dpi_packets(dpi), "DPI config");
             did_config = true;
         }
 
@@ -585,7 +634,13 @@ int main(int argc, char* argv[]) {
                 exit_code = 1;
                 goto cleanup;
             }
-            send_sequence(mouse, build_led_packets(mode), "LED mode");
+            if (is_compx) {
+                uint32_t slot_color = (mode == LedMode::Off) ? 0x000000 : 0x00ff00;
+                uint32_t colors[5] = {slot_color, slot_color, slot_color, slot_color, slot_color};
+                send_sequence(mouse, build_compx_color_packets(colors, 5), "LED color");
+            } else {
+                send_sequence(mouse, build_led_packets(mode), "LED mode");
+            }
             did_config = true;
         }
 
@@ -612,7 +667,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             send_sequence(mouse,
-                          build_button_mapping(btn_changes),
+                          build_button_mapping(btn_changes, btn_layout),
                           "Button mapping");
             did_config = true;
         }

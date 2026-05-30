@@ -39,6 +39,43 @@ uint8_t compute_checksum(const Packet& p) {
 // Internal data tables (from mouse_m908 M913 data.cpp / rd_mouse_wireless.cpp)
 // -----------------------------------------------------------------------
 
+// Button index layout for Compx hardware (VID 3554).
+// Detected via --detect-layout on a real device.
+// layout[button_enum_value] = protocol_index
+const uint8_t COMPX_LAYOUT[16] = {
+    3,   // Side1  (enum 0)  → protocol index 3
+    4,   // Side2  (enum 1)  → protocol index 4
+    5,   // Side3  (enum 2)  → protocol index 5
+    6,   // Side4  (enum 3)  → protocol index 6
+    7,   // Side5  (enum 4)  → protocol index 7
+    10,  // Side6  (enum 5)  → protocol index 10
+    1,   // Right  (enum 6)  → protocol index 1
+    0,   // Left   (enum 7)  → protocol index 0
+    9,   // Side7  (enum 8)  → protocol index 9
+    15,  // Side8  (enum 9)  → protocol index 15
+    2,   // Middle (enum 10) → protocol index 2
+    8,   // Fire   (enum 11) → protocol index 8
+    14,  // Side9  (enum 12) → protocol index 14
+    13,  // Side10 (enum 13) → protocol index 13
+    12,  // Side11 (enum 14) → protocol index 12
+    11,  // Side12 (enum 15) → protocol index 11
+};
+
+// Default button-mapping packets for Compx hardware (VID 3554).
+// Layout: proto_idx 0=Left, 1=Right, 2=Middle, 3-7=Side1-5,
+//         8=Fire, 9=Side7, 10=Side6, 11-15=Side12-8.
+// Checksums are placeholder 0x00 — recomputed by build_button_mapping.
+static const uint8_t compx_default_button_mapping[8][17] = {
+    {0x08,0x07,0x00,0x00,0x60,0x08, 0x01,0x01,0x00,0x53, 0x01,0x02,0x00,0x52, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x68,0x08, 0x01,0x04,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x70,0x08, 0x05,0x00,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x78,0x08, 0x05,0x00,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x80,0x08, 0x05,0x00,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x88,0x08, 0x05,0x00,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x90,0x08, 0x05,0x00,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+    {0x08,0x07,0x00,0x00,0x98,0x08, 0x05,0x00,0x00,0x50, 0x05,0x00,0x00,0x50, 0x00,0x00,0x00},
+};
+
 // Default button-mapping packets (8 × 17 bytes).
 // Two buttons per packet; addresses step by 0x08 from 0x60.
 // Source: mouse_m913::_c_data_button_mapping
@@ -201,12 +238,15 @@ static const uint8_t* lookup_dpi(uint16_t dpi) {
 // -----------------------------------------------------------------------
 
 std::vector<Packet> build_button_mapping(
-        const std::map<uint8_t, ActionBytes>& changes) {
+        const std::map<uint8_t, ActionBytes>& changes,
+        const uint8_t* layout) {
 
-    // Start from the default 8-packet template.
+    // Start from the appropriate 8-packet default template.
+    const uint8_t (*defaults)[17] = layout ? compx_default_button_mapping
+                                            : default_button_mapping;
     Packet buf[8];
     for (int i = 0; i < 8; ++i)
-        buf[i] = from_raw(default_button_mapping[i]);
+        buf[i] = from_raw(defaults[i]);
 
     // The action bytes of button `b` sit at:
     //   packet[b/2], bytes [6..9]  if b is even
@@ -218,6 +258,9 @@ std::vector<Packet> build_button_mapping(
 
     for (auto& [btn_idx, ab] : changes) {
         if (btn_idx >= 16) continue;  // out of range
+
+        // Translate button enum value to protocol index for this device.
+        uint8_t proto_idx = layout ? layout[btn_idx] : btn_idx;
 
         if (ab[0] == 0x90 || ab[0] == 0x92) {
             // Keyboard-key action: ab = {0x90, modifier, scancode, 0x00} (single key)
@@ -240,8 +283,8 @@ std::vector<Packet> build_button_mapping(
             //
             // The mapping slot always gets the same KB marker (05 00 00 50).
 
-            uint8_t addr_hi = kb_key_addr[btn_idx][0];
-            uint8_t addr_lo = kb_key_addr[btn_idx][1];
+            uint8_t addr_hi = kb_key_addr[proto_idx][0];
+            uint8_t addr_lo = kb_key_addr[proto_idx][1];
 
             if (ab[0] == 0x92) {
                 // Multimedia key: generate sub-packet with consumer code
@@ -375,14 +418,14 @@ std::vector<Packet> build_button_mapping(
             }
 
             // Put the keyboard_key marker in the mapping packet.
-            int pkt = btn_idx / 2;
-            int off = (btn_idx % 2 == 0) ? 6 : 10;
+            int pkt = proto_idx / 2;
+            int off = (proto_idx % 2 == 0) ? 6 : 10;
             for (int k = 0; k < 4; ++k)
                 buf[pkt][off + k] = kb_key_action[k];
         } else {
             // Direct action (mouse button, DPI cycle, etc.)
-            int pkt = btn_idx / 2;
-            int off = (btn_idx % 2 == 0) ? 6 : 10;
+            int pkt = proto_idx / 2;
+            int off = (proto_idx % 2 == 0) ? 6 : 10;
             for (int k = 0; k < 4; ++k)
                 buf[pkt][off + k] = ab[k];
         }
@@ -554,6 +597,67 @@ Packet build_polling_rate_packet(uint16_t hz) {
     p[7] = static_cast<uint8_t>((0x55u - code) & 0xFF);
     p[16] = compute_checksum(p);
     return p;
+}
+
+// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Compx hardware (VID 3554)
+// -----------------------------------------------------------------------
+
+// Build a single Compx-style 17-byte config packet.
+// addr: memory address byte (byte[4]); len: payload length (byte[5])
+// b6..b9: payload bytes[6..9] (inner checksum in b9 is caller's responsibility)
+static Packet compx_packet(uint8_t addr, uint8_t len,
+                            uint8_t b6, uint8_t b7, uint8_t b8, uint8_t b9) {
+    Packet p{};
+    p[0]=0x08; p[1]=0x07; p[2]=0x00; p[3]=0x00;
+    p[4]=addr; p[5]=len;
+    p[6]=b6; p[7]=b7; p[8]=b8; p[9]=b9;
+    p[16] = compute_checksum(p);
+    return p;
+}
+
+std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi) {
+    std::vector<Packet> result;
+
+    // One DPI value packet per slot. Encoding: code = (DPI / 50) - 1,
+    // stored in bytes[6] and [7], addr = 0x0c + slot*0x04.
+    for (int i = 0; i < 5; ++i) {
+        if (dpi.values[i] == 0) continue;
+        uint8_t addr = static_cast<uint8_t>(0x0c + i * 0x04);
+        uint8_t code = static_cast<uint8_t>((dpi.values[i] / 50) - 1);
+        uint8_t inner = (0x55u - code - code) & 0xFF;
+        result.push_back(compx_packet(addr, 0x04, code, code, 0x00, inner));
+    }
+
+    // Stage-count packet (addr=0x02): byte[6] = number of active stages,
+    // byte[7] = 0x55 - count. Same control as the original hardware; the
+    // Compx device honours it (disabling cascades from the top down, so
+    // dpi2_enable=0 yields a single active stage).
+    uint8_t count = 0x05, comp = 0x50;
+    if (!dpi.enabled[4]) { count = 0x04; comp = 0x51; }
+    if (!dpi.enabled[3]) { count = 0x03; comp = 0x52; }
+    if (!dpi.enabled[2]) { count = 0x02; comp = 0x53; }
+    if (!dpi.enabled[1]) { count = 0x01; comp = 0x54; }
+    result.push_back(compx_packet(0x02, 0x02, count, comp, 0x00, 0x00));
+
+    return result;
+}
+
+std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots) {
+    std::vector<Packet> result;
+
+    for (int i = 0; i < n_slots; ++i) {
+        if (colors[i] == 0xFFFFFFFF) continue;  // not set, skip
+        uint8_t addr  = static_cast<uint8_t>(0x2c + i * 0x04);
+        uint8_t r     = (colors[i] >> 16) & 0xFF;
+        uint8_t g     = (colors[i] >>  8) & 0xFF;
+        uint8_t b     = (colors[i]      ) & 0xFF;
+        uint8_t inner = (0x55u - r - g - b) & 0xFF;
+        result.push_back(compx_packet(addr, 0x04, r, g, b, inner));
+    }
+
+    return result;
 }
 
 // -----------------------------------------------------------------------
