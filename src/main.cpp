@@ -371,7 +371,10 @@ int main(int argc, char* argv[]) {
             mouse.open(M913_VID, M913_PID_WIRED);
             pid = M913_PID_WIRED;
         }
-        std::cout << "Connected (25a7:" << std::hex << pid << std::dec << ").\n";
+        std::cout << "Connected (" << std::hex
+                  << std::setw(4) << std::setfill('0') << M913_VID << ":"
+                  << std::setw(4) << std::setfill('0') << pid
+                  << std::dec << ").\n";
 
         // Drain any spontaneous init/hello packet from the wireless device.
         uint8_t init_buf[64] = {};
