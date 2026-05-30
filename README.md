@@ -148,6 +148,8 @@ See [examples/example.ini](examples/example.ini) for a complete example.
 - `fire` — default fire (hardware auto-repeat)
 - `fire:speed:times` — custom speed (3–255, lower=faster) and repeat count (0–3)
 
+> **Note:** The minimum usable speed depends on your OS debounce threshold. Very low values (e.g. `speed=3`) may cause all clicks to register as one. Start around `speed=25` and tune down until clicks stop being detected.
+
 ### Multimedia
 `media_play` `media_player` `media_next` `media_prev` `media_stop`
 `media_vol_up` `media_vol_down` `media_mute`
