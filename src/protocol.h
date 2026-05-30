@@ -134,6 +134,20 @@ std::vector<Packet> build_led_packets(LedMode mode,
 Packet build_polling_rate_packet(uint16_t hz);
 
 // -----------------------------------------------------------------------
+// Compx hardware (VID 3554) — different DPI and LED protocol
+// -----------------------------------------------------------------------
+
+// Build DPI packets for Compx hardware.
+// DPI values must be multiples of 50 in range 50–12750.
+// Values of 0 for a slot leave that slot unchanged.
+std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi);
+
+// Build per-slot color packets for Compx hardware.
+// colors[5]: one 0xRRGGBB per slot; 0x000000 = LED off for that slot.
+// n_slots: number of active DPI slots (1–5).
+std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots);
+
+// -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
 

@@ -46,6 +46,10 @@ public:
     // Open and claim all interfaces found on the device (for debug/investigation)
     void open_all_interfaces(uint16_t vid, uint16_t pid);
 
+    // Override the HID report type used in SET_REPORT control transfers.
+    // Areson hardware: 0x0308 (feature report). Compx hardware: 0x0208 (output report).
+    void set_ctrl_value(uint16_t v) { _ctrl_value = v; }
+
     // Close and reattach kernel driver
     void close();
 
@@ -75,10 +79,11 @@ private:
     libusb_context*       _ctx    = nullptr;
     libusb_device_handle* _handle = nullptr;
 
-    bool _detached_iface0 = false;
-    bool _detached_iface1 = false;
-    bool _detached_iface2 = false;
-    int  _num_interfaces   = 2;
+    bool     _detached_iface0 = false;
+    bool     _detached_iface1 = false;
+    bool     _detached_iface2 = false;
+    int      _num_interfaces   = 2;
+    uint16_t _ctrl_value       = CTRL_VALUE;
 
     void _claim_interface(int iface, bool& detached_flag);
     void _release_interface(int iface, bool detached_flag);

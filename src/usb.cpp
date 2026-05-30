@@ -92,7 +92,7 @@ void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
         _handle,
         CTRL_REQUEST_TYPE,
         CTRL_REQUEST,
-        CTRL_VALUE,
+        _ctrl_value,
         CTRL_INDEX,
         buf,
         M913_PACKET_SIZE,

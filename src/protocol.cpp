@@ -600,6 +600,65 @@ Packet build_polling_rate_packet(uint16_t hz) {
 }
 
 // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Compx hardware (VID 3554)
+// -----------------------------------------------------------------------
+
+// Build a single Compx-style 17-byte config packet.
+// addr: memory address byte (byte[4]); len: payload length (byte[5])
+// b6..b9: payload bytes[6..9] (inner checksum in b9 is caller's responsibility)
+static Packet compx_packet(uint8_t addr, uint8_t len,
+                            uint8_t b6, uint8_t b7, uint8_t b8, uint8_t b9) {
+    Packet p{};
+    p[0]=0x08; p[1]=0x07; p[2]=0x00; p[3]=0x00;
+    p[4]=addr; p[5]=len;
+    p[6]=b6; p[7]=b7; p[8]=b8; p[9]=b9;
+    p[16] = compute_checksum(p);
+    return p;
+}
+
+std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi) {
+    std::vector<Packet> result;
+
+    // Count active slots and find the highest enabled slot index.
+    int n_active = 0;
+    for (int i = 0; i < 5; ++i)
+        if (dpi.enabled[i]) n_active = i + 1;
+
+    // Slot-select packet (addr=0x04): only needed for slots 2–5.
+    if (n_active > 1) {
+        uint8_t n = static_cast<uint8_t>(n_active - 1);
+        result.push_back(compx_packet(0x04, 0x02, n, (0x55u - n) & 0xFF, 0x00, 0x00));
+    }
+
+    // One DPI value packet per active slot.
+    for (int i = 0; i < 5; ++i) {
+        if (!dpi.enabled[i] || dpi.values[i] == 0) continue;
+        uint8_t addr = static_cast<uint8_t>(0x0c + i * 0x04);
+        uint8_t code = static_cast<uint8_t>((dpi.values[i] / 50) - 1);
+        uint8_t inner = (0x55u - code - code) & 0xFF;
+        result.push_back(compx_packet(addr, 0x04, code, code, 0x00, inner));
+    }
+
+    return result;
+}
+
+std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots) {
+    std::vector<Packet> result;
+
+    for (int i = 0; i < n_slots; ++i) {
+        uint8_t addr  = static_cast<uint8_t>(0x2c + i * 0x04);
+        uint8_t r     = (colors[i] >> 16) & 0xFF;
+        uint8_t g     = (colors[i] >>  8) & 0xFF;
+        uint8_t b     = (colors[i]      ) & 0xFF;
+        uint8_t inner = (0x55u - r - g - b) & 0xFF;
+        result.push_back(compx_packet(addr, 0x04, r, g, b, inner));
+    }
+
+    return result;
+}
+
+// -----------------------------------------------------------------------
 // Diagnostics
 // -----------------------------------------------------------------------
 
