@@ -10,7 +10,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <termios.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "config.h"
@@ -208,6 +210,7 @@ int main(int argc, char* argv[]) {
         {"list-actions",  no_argument,       nullptr, 1004},
         {"profile",       required_argument, nullptr, 1005},
         {"polling-rate",  required_argument, nullptr, 1011},
+        {"detect-layout", no_argument,       nullptr, 1012},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -216,6 +219,7 @@ int main(int argc, char* argv[]) {
     bool        do_listen         = false;
     bool        do_probe_commands = false;
     bool        do_debug_device   = false;
+    bool        do_detect_layout  = false;
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
     std::string raw_send_hex;
@@ -323,6 +327,10 @@ int main(int argc, char* argv[]) {
             do_debug_device = true;
             break;
 
+        case 1012:  // --detect-layout
+            do_detect_layout = true;
+            break;
+
         case 1011: {  // --polling-rate HZ
             try {
                 int r = std::stoi(optarg);
@@ -360,13 +368,119 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- validate that there's something to do ----
-    bool has_work = do_probe || do_probe_commands || do_listen || do_debug_device ||
+    bool has_work = do_probe || do_probe_commands || do_listen || do_debug_device || do_detect_layout ||
                     !raw_send_hex.empty() ||
                     !config_file.empty() ||
                     !dpi_args.empty() || !led_arg.empty() || !btn_args.empty() ||
                     polling_rate_arg != 0;
     if (!has_work) {
         print_help(argv[0]);
+        return 0;
+    }
+
+    // ---- --detect-layout: map button indices to physical buttons ----
+    if (do_detect_layout) {
+        // Letters a-p as unique identifiers for each of the 16 button indices.
+        // HID scancodes: a=0x04, b=0x05, ..., p=0x13
+        static const char    id_char[16]  = {'a','b','c','d','e','f','g','h',
+                                              'i','j','k','l','m','n','o','p'};
+        static const uint8_t id_scan[16]  = {0x04,0x05,0x06,0x07,0x08,0x09,
+                                              0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+                                              0x10,0x11,0x12,0x13};
+
+        // Friendly names in the order we ask the user to press them.
+        static const char* btn_names[16] = {
+            "side1","side2","side3","side4","side5","side6",
+            "side7","side8","side9","side10","side11","side12",
+            "left","right","middle","fire"
+        };
+
+        // Step 1: open, remap all 16 indices to unique letters, close.
+        {
+            UsbMouse dlm;
+            bool opened = false;
+            const std::vector<std::pair<uint16_t,uint16_t>> candidates = {
+                {M913_VID,  M913_PID}, {M913_VID,  M913_PID_WIRED},
+                {COMPX_VID, COMPX_PID},{COMPX_VID, COMPX_PID_WIRED},
+            };
+            uint16_t found_vid = 0, found_pid = 0;
+            for (auto [v, p] : candidates) {
+                try { dlm.open_all_interfaces(v, p); found_vid=v; found_pid=p; opened=true; break; }
+                catch (...) {}
+            }
+            if (!opened) {
+                std::cerr << "Error: no supported device found.\n";
+                return 1;
+            }
+            std::cout << "Connected (" << std::hex
+                      << std::setw(4) << std::setfill('0') << found_vid << ":"
+                      << std::setw(4) << std::setfill('0') << found_pid
+                      << std::dec << ").\n";
+            std::cout << "Remapping all 16 button indices to letters a-p...\n";
+
+            std::map<uint8_t, ActionBytes> changes;
+            for (uint8_t i = 0; i < 16; ++i)
+                changes[i] = {0x90, 0x00, id_scan[i], 0x01};
+
+            auto pkts = build_button_mapping(changes);
+            for (auto& p : pkts) send_cmd(dlm, p, "");
+
+            // dlm goes out of scope here → close() reattaches kernel driver
+        }
+
+        std::cout << "\nAll buttons remapped. The mouse is now released back to the OS.\n";
+        std::cout << "Each physical button now sends a unique letter (a-p).\n\n";
+        std::cout << "For each button named below, press the corresponding physical button on the mouse:\n\n";
+
+        // Step 2: interactive — ask for each button name, read the letter.
+        // char_to_index: which index did we assign to letter X?
+        int char_to_index[256];
+        std::fill(char_to_index, char_to_index + 256, -1);
+        for (int i = 0; i < 16; ++i)
+            char_to_index[static_cast<uint8_t>(id_char[i])] = i;
+
+        int layout[16];  // layout[button_name_idx] = protocol_index
+        std::fill(layout, layout + 16, -1);
+
+        // Put terminal in raw mode so single keypresses are captured.
+        struct termios orig, raw;
+        tcgetattr(STDIN_FILENO, &orig);
+        raw = orig;
+        raw.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+        bool aborted = false;
+        for (int b = 0; b < 16 && !aborted; ++b) {
+            std::cout << "  " << btn_names[b] << ": " << std::flush;
+            char ch = 0;
+            while (true) {
+                if (read(STDIN_FILENO, &ch, 1) < 1) { aborted = true; break; }
+                if (ch == 3 || ch == 27) { aborted = true; break; } // Ctrl+C / Esc
+                int idx = char_to_index[static_cast<uint8_t>(ch)];
+                if (idx >= 0) {
+                    std::cout << ch << "\n";
+                    layout[b] = idx;
+                    break;
+                }
+                // ignore keys that aren't a-p
+            }
+        }
+
+        tcsetattr(STDIN_FILENO, TCSANOW, &orig);
+
+        if (aborted) {
+            std::cout << "\nAborted.\n";
+            return 1;
+        }
+
+        std::cout << "\n--- Detected layout ---\n";
+        std::cout << "Button name   -> protocol index\n";
+        std::cout << std::dec << std::setfill(' ');
+        for (int b = 0; b < 16; ++b) {
+            std::cout << "  " << std::left << std::setw(10) << btn_names[b]
+                      << " -> index " << layout[b] << "\n";
+        }
+        std::cout << "\nPlease share this output in the GitHub issue.\n";
         return 0;
     }
 
