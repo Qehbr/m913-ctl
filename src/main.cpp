@@ -479,15 +479,26 @@ int main(int argc, char* argv[]) {
     // ---- open mouse ----
     UsbMouse mouse;
     try {
-        uint16_t pid = M913_PID;
-        try {
-            mouse.open(M913_VID, M913_PID);
-        } catch (const std::exception&) {
-            mouse.open(M913_VID, M913_PID_WIRED);
-            pid = M913_PID_WIRED;
+        uint16_t vid = M913_VID, pid = M913_PID;
+        const std::vector<std::pair<uint16_t,uint16_t>> candidates = {
+            {M913_VID,  M913_PID},
+            {M913_VID,  M913_PID_WIRED},
+            {COMPX_VID, COMPX_PID},
+            {COMPX_VID, COMPX_PID_WIRED},
+        };
+        bool opened = false;
+        for (auto [v, p] : candidates) {
+            try {
+                mouse.open_all_interfaces(v, p);
+                vid = v; pid = p; opened = true;
+                break;
+            } catch (...) {}
         }
+        if (!opened)
+            throw std::runtime_error("Could not find any supported M913 variant — is the mouse plugged in? Try running with sudo or install the udev rule.");
+
         std::cout << "Connected (" << std::hex
-                  << std::setw(4) << std::setfill('0') << M913_VID << ":"
+                  << std::setw(4) << std::setfill('0') << vid << ":"
                   << std::setw(4) << std::setfill('0') << pid
                   << std::dec << ").\n";
 
