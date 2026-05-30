@@ -13,8 +13,9 @@ struct Config {
 
     // [dpi] section
     struct DpiConfig {
-        uint16_t value   = 0;     // 0 means "not set"
+        uint16_t value   = 0;            // 0 means "not set"
         bool     enabled = true;
+        uint32_t color   = 0xFFFFFFFF;   // per-slot LED color (Compx); 0xFFFFFFFF = not set
     };
     DpiConfig dpi[5];  // dpi[0] = dpi1, ..., dpi[4] = dpi5
 

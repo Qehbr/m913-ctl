@@ -115,6 +115,8 @@ std::vector<Packet> build_button_mapping(
 struct DpiSettings {
     std::array<uint16_t, 5> values  = {0, 0, 0, 0, 0};
     std::array<bool,     5> enabled = {true, true, true, true, true};
+    // Per-slot RGB colors for Compx hardware (0xFFFFFFFF = not set / use default)
+    std::array<uint32_t, 5> colors  = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
 };
 
 // Build the complete DPI packet sequence (4 DPI config packets +
@@ -144,6 +146,7 @@ std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi);
 
 // Build per-slot color packets for Compx hardware.
 // colors[5]: one 0xRRGGBB per slot; 0x000000 = LED off for that slot.
+//            0xFFFFFFFF = skip this slot (no packet sent).
 // n_slots: number of active DPI slots (1–5).
 std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots);
 

@@ -620,25 +620,26 @@ static Packet compx_packet(uint8_t addr, uint8_t len,
 std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi) {
     std::vector<Packet> result;
 
-    // Count active slots and find the highest enabled slot index.
-    int n_active = 0;
-    for (int i = 0; i < 5; ++i)
-        if (dpi.enabled[i]) n_active = i + 1;
-
-    // Slot-select packet (addr=0x04): only needed for slots 2–5.
-    if (n_active > 1) {
-        uint8_t n = static_cast<uint8_t>(n_active - 1);
-        result.push_back(compx_packet(0x04, 0x02, n, (0x55u - n) & 0xFF, 0x00, 0x00));
-    }
-
-    // One DPI value packet per active slot.
+    // One DPI value packet per slot. Encoding: code = (DPI / 50) - 1,
+    // stored in bytes[6] and [7], addr = 0x0c + slot*0x04.
     for (int i = 0; i < 5; ++i) {
-        if (!dpi.enabled[i] || dpi.values[i] == 0) continue;
+        if (dpi.values[i] == 0) continue;
         uint8_t addr = static_cast<uint8_t>(0x0c + i * 0x04);
         uint8_t code = static_cast<uint8_t>((dpi.values[i] / 50) - 1);
         uint8_t inner = (0x55u - code - code) & 0xFF;
         result.push_back(compx_packet(addr, 0x04, code, code, 0x00, inner));
     }
+
+    // Stage-count packet (addr=0x02): byte[6] = number of active stages,
+    // byte[7] = 0x55 - count. Same control as the original hardware; the
+    // Compx device honours it (disabling cascades from the top down, so
+    // dpi2_enable=0 yields a single active stage).
+    uint8_t count = 0x05, comp = 0x50;
+    if (!dpi.enabled[4]) { count = 0x04; comp = 0x51; }
+    if (!dpi.enabled[3]) { count = 0x03; comp = 0x52; }
+    if (!dpi.enabled[2]) { count = 0x02; comp = 0x53; }
+    if (!dpi.enabled[1]) { count = 0x01; comp = 0x54; }
+    result.push_back(compx_packet(0x02, 0x02, count, comp, 0x00, 0x00));
 
     return result;
 }
@@ -647,6 +648,7 @@ std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_sl
     std::vector<Packet> result;
 
     for (int i = 0; i < n_slots; ++i) {
+        if (colors[i] == 0xFFFFFFFF) continue;  // not set, skip
         uint8_t addr  = static_cast<uint8_t>(0x2c + i * 0x04);
         uint8_t r     = (colors[i] >> 16) & 0xFF;
         uint8_t g     = (colors[i] >>  8) & 0xFF;

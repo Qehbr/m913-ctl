@@ -177,24 +177,33 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
     }
 
     // ---- LED ----
-    if (cfg.led.set) {
-        if (is_compx) {
-            // Compx has per-slot RGB colors, no global LED modes.
-            // Map the config LED settings to per-slot colors:
-            //   off        → black (#000000) on all slots
-            //   otherwise  → apply cfg.led.color to all active slots
+    if (is_compx) {
+        // Compx has per-slot RGB colors, no global LED modes.
+        //   [led] section    → applies one color to every active slot
+        //                       (mode=off → black)
+        //   dpiN_color keys  → override individual slots, take precedence
+        bool any_color = cfg.led.set;
+        for (int i = 0; i < 5; ++i)
+            if (cfg.dpi[i].color != 0xFFFFFFFF) any_color = true;
+
+        if (any_color) {
             int n_slots = 1;
             for (int i = 0; i < 5; ++i)
                 if (cfg.dpi[i].enabled) n_slots = i + 1;
-            uint32_t slot_color = (cfg.led.mode == LedMode::Off) ? 0x000000 : cfg.led.color;
+
             uint32_t colors[5];
-            for (int i = 0; i < 5; ++i) colors[i] = slot_color;
+            uint32_t global = cfg.led.set
+                ? ((cfg.led.mode == LedMode::Off) ? 0x000000 : cfg.led.color)
+                : 0xFFFFFFFF;
+            for (int i = 0; i < 5; ++i)
+                colors[i] = (cfg.dpi[i].color != 0xFFFFFFFF) ? cfg.dpi[i].color : global;
+
             send_sequence(mouse, build_compx_color_packets(colors, n_slots), "LED color");
-        } else {
-            send_sequence(mouse,
-                          build_led_packets(cfg.led.mode, cfg.led.color, cfg.led.brightness, cfg.led.speed),
-                          "LED mode");
         }
+    } else if (cfg.led.set) {
+        send_sequence(mouse,
+                      build_led_packets(cfg.led.mode, cfg.led.color, cfg.led.brightness, cfg.led.speed),
+                      "LED mode");
     }
 
     // ---- Polling rate ----
