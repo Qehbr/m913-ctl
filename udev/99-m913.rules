@@ -1,6 +1,13 @@
 # Redragon M913 Impact Elite — udev rule for non-root USB access
 
-# 2.4G wireless receiver (VID 25a7, PID fa07)
+# --- Original hardware (Areson, VID 25a7) ---
+# 2.4G wireless receiver (PID fa07)
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="25a7", ATTRS{idProduct}=="fa07", MODE="0666"
-# Wired / dual-mode USB (VID 25a7, PID fa08)
+# Wired / dual-mode USB (PID fa08)
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="25a7", ATTRS{idProduct}=="fa08", MODE="0666"
+
+# --- Newer hardware (Compx, VID 3554) ---
+# 2.4G wireless receiver (PID f55d)
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f55d", MODE="0666"
+# Wired / 3-mode USB (PID f55e)
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f55e", MODE="0666"

@@ -1,8 +1,19 @@
 # m913-ctl
 
-Linux configuration tool for the **Redragon M913 Impact Elite** wireless mouse. Works in both wireless (2.4G receiver, `25a7:fa07`) and wired (`25a7:fa08`) modes.
+Linux configuration tool for the **Redragon M913 Impact Elite** wireless mouse.
 
 Reverse-engineered from USB captures of the official Redragon Windows software. No Windows required.
+
+## Supported hardware
+
+Two hardware revisions of the M913 ship under the same name. Both are supported and auto-detected:
+
+| Revision | Wireless | Wired |
+|----------|----------|-------|
+| Original (Areson) | `25a7:fa07` | `25a7:fa08` |
+| Newer (Compx, tri-mode) | `3554:f55d` | `3554:f55e` |
+
+The Compx revision differs in a few ways — see [Compx hardware notes](#compx-hardware-notes) below.
 
 ## Features
 
@@ -10,8 +21,8 @@ Reverse-engineered from USB captures of the official Redragon Windows software. 
 - **Key combinations** — modifier+key (`ctrl+c`), multi-key (`a+b`, max 3 keys)
 - **Multimedia keys** — play, next, prev, stop, volume, mute, email, calculator, browser controls
 - **Fire button** — configurable speed and repeat count
-- **DPI profiles** — 5 slots, 100–16000 DPI in steps of 100
-- **LED modes** — off, steady (color + brightness), respiration (color + speed), rainbow
+- **DPI profiles** — 5 slots (Areson: 100–16000 in steps of 100; Compx: steps of 50)
+- **LED** — Areson: off/steady/respiration/rainbow modes; Compx: per-DPI-stage RGB color
 - **Polling rate** — 125, 250, 500, or 1000 Hz
 - **Config files** — INI format for saving and sharing configurations
 
@@ -164,12 +175,36 @@ All standard keys: `a`–`z`, `0`–`9`, `f1`–`f24`, `enter`, `space`, `tab`, 
 
 ## LED settings
 
+These apply to the **original (Areson)** hardware. For the Compx revision, see below.
+
 | Parameter | Range | Modes |
 |-----------|-------|-------|
 | `mode` | `off`, `steady`, `respiration`, `rainbow` | — |
 | `color` | Hex RGB (`ff0000` = red) | steady, respiration |
 | `brightness` | 0–255 (10 hardware levels) | steady |
 | `speed` | 1–5 (1=slowest, 5=fastest) | respiration |
+
+## Compx hardware notes
+
+The newer Compx revision (`3554:f55d` / `3554:f55e`) is auto-detected and uses the
+same commands, with a few differences:
+
+- **DPI** steps are 50 (e.g. `400`, `450`, `500`), not 100.
+- **LED is per DPI stage** — there are no global modes. Each DPI stage has its own
+  RGB color, set with `dpiN_color` in the `[dpi]` section. `000000` turns that
+  stage's LED off. The `[led]` section, if present, applies one color (or `off`)
+  to every active stage; per-stage `dpiN_color` overrides it.
+
+```ini
+[dpi]
+dpi1=400
+dpi1_color=ff0000
+dpi2=800
+dpi2_color=0000ff
+dpi2_enable=0      ; collapse to a single active stage (top-down only)
+```
+
+See [examples/example_compx.ini](examples/example_compx.ini) for a complete example.
 
 ## Diagnostics
 
