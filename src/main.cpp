@@ -132,7 +132,8 @@ static void send_sequence(UsbMouse& mouse,
 // -----------------------------------------------------------------------
 // Apply a full config to the mouse
 // -----------------------------------------------------------------------
-static void apply_config(UsbMouse& mouse, const Config& cfg) {
+static void apply_config(UsbMouse& mouse, const Config& cfg,
+                         const uint8_t* btn_layout = nullptr) {
 
     // ---- Buttons ----
     std::map<uint8_t, ActionBytes> btn_changes;
@@ -155,7 +156,7 @@ static void apply_config(UsbMouse& mouse, const Config& cfg) {
         }
     }
     if (!btn_changes.empty())
-        send_sequence(mouse, build_button_mapping(btn_changes), "Button mapping");
+        send_sequence(mouse, build_button_mapping(btn_changes, btn_layout), "Button mapping");
 
     // ---- DPI ----
     bool any_dpi = false;
@@ -481,6 +482,8 @@ int main(int argc, char* argv[]) {
                       << " -> index " << layout[b] << "\n";
         }
         std::cout << "\nPlease share this output in the GitHub issue.\n";
+        std::cout << "\nNOTE: your buttons are still remapped to letters. Reset your mouse\n";
+        std::cout << "via Redragon software or apply your config file to restore them.\n";
         return 0;
     }
 
@@ -592,6 +595,7 @@ int main(int argc, char* argv[]) {
 
     // ---- open mouse ----
     UsbMouse mouse;
+    const uint8_t* btn_layout = nullptr;
     try {
         uint16_t vid = M913_VID, pid = M913_PID;
         const std::vector<std::pair<uint16_t,uint16_t>> candidates = {
@@ -610,6 +614,8 @@ int main(int argc, char* argv[]) {
         }
         if (!opened)
             throw std::runtime_error("Could not find any supported M913 variant — is the mouse plugged in? Try running with sudo or install the udev rule.");
+
+        btn_layout = (vid == COMPX_VID) ? COMPX_LAYOUT : nullptr;
 
         std::cout << "Connected (" << std::hex
                   << std::setw(4) << std::setfill('0') << vid << ":"
@@ -793,7 +799,7 @@ int main(int argc, char* argv[]) {
             Config cfg = parse_config_file(config_file);
             cfg.profile = profile;
             validate_config(cfg);
-            apply_config(mouse, cfg);
+            apply_config(mouse, cfg, btn_layout);
             did_config = true;
         }
 
@@ -852,7 +858,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             send_sequence(mouse,
-                          build_button_mapping(btn_changes),
+                          build_button_mapping(btn_changes, btn_layout),
                           "Button mapping");
             did_config = true;
         }

@@ -39,6 +39,28 @@ uint8_t compute_checksum(const Packet& p) {
 // Internal data tables (from mouse_m908 M913 data.cpp / rd_mouse_wireless.cpp)
 // -----------------------------------------------------------------------
 
+// Button index layout for Compx hardware (VID 3554).
+// Detected via --detect-layout on a real device.
+// layout[button_enum_value] = protocol_index
+const uint8_t COMPX_LAYOUT[16] = {
+    3,   // Side1  (enum 0)  → protocol index 3
+    4,   // Side2  (enum 1)  → protocol index 4
+    5,   // Side3  (enum 2)  → protocol index 5
+    6,   // Side4  (enum 3)  → protocol index 6
+    7,   // Side5  (enum 4)  → protocol index 7
+    10,  // Side6  (enum 5)  → protocol index 10
+    1,   // Right  (enum 6)  → protocol index 1
+    0,   // Left   (enum 7)  → protocol index 0
+    9,   // Side7  (enum 8)  → protocol index 9
+    15,  // Side8  (enum 9)  → protocol index 15
+    2,   // Middle (enum 10) → protocol index 2
+    8,   // Fire   (enum 11) → protocol index 8
+    14,  // Side9  (enum 12) → protocol index 14
+    13,  // Side10 (enum 13) → protocol index 13
+    12,  // Side11 (enum 14) → protocol index 12
+    11,  // Side12 (enum 15) → protocol index 11
+};
+
 // Default button-mapping packets (8 × 17 bytes).
 // Two buttons per packet; addresses step by 0x08 from 0x60.
 // Source: mouse_m913::_c_data_button_mapping
@@ -201,7 +223,8 @@ static const uint8_t* lookup_dpi(uint16_t dpi) {
 // -----------------------------------------------------------------------
 
 std::vector<Packet> build_button_mapping(
-        const std::map<uint8_t, ActionBytes>& changes) {
+        const std::map<uint8_t, ActionBytes>& changes,
+        const uint8_t* layout) {
 
     // Start from the default 8-packet template.
     Packet buf[8];
@@ -218,6 +241,9 @@ std::vector<Packet> build_button_mapping(
 
     for (auto& [btn_idx, ab] : changes) {
         if (btn_idx >= 16) continue;  // out of range
+
+        // Translate button enum value to protocol index for this device.
+        uint8_t proto_idx = layout ? layout[btn_idx] : btn_idx;
 
         if (ab[0] == 0x90 || ab[0] == 0x92) {
             // Keyboard-key action: ab = {0x90, modifier, scancode, 0x00} (single key)
@@ -240,8 +266,8 @@ std::vector<Packet> build_button_mapping(
             //
             // The mapping slot always gets the same KB marker (05 00 00 50).
 
-            uint8_t addr_hi = kb_key_addr[btn_idx][0];
-            uint8_t addr_lo = kb_key_addr[btn_idx][1];
+            uint8_t addr_hi = kb_key_addr[proto_idx][0];
+            uint8_t addr_lo = kb_key_addr[proto_idx][1];
 
             if (ab[0] == 0x92) {
                 // Multimedia key: generate sub-packet with consumer code
@@ -375,14 +401,14 @@ std::vector<Packet> build_button_mapping(
             }
 
             // Put the keyboard_key marker in the mapping packet.
-            int pkt = btn_idx / 2;
-            int off = (btn_idx % 2 == 0) ? 6 : 10;
+            int pkt = proto_idx / 2;
+            int off = (proto_idx % 2 == 0) ? 6 : 10;
             for (int k = 0; k < 4; ++k)
                 buf[pkt][off + k] = kb_key_action[k];
         } else {
             // Direct action (mouse button, DPI cycle, etc.)
-            int pkt = btn_idx / 2;
-            int off = (btn_idx % 2 == 0) ? 6 : 10;
+            int pkt = proto_idx / 2;
+            int off = (proto_idx % 2 == 0) ? 6 : 10;
             for (int k = 0; k < 4; ++k)
                 buf[pkt][off + k] = ab[k];
         }

@@ -100,8 +100,15 @@ void clear_multikey_actions();
 //     prepended and {0x05,0x00,0x00,0x50} is used in the mapping packet.
 //
 // Buttons NOT in `changes` keep their factory-default actions.
+// Button index layout for Compx hardware (VID 3554).
+// layout[button_enum_value] = protocol_index
+extern const uint8_t COMPX_LAYOUT[16];
+
+// layout: optional translation table (button enum value → protocol index).
+//         Pass nullptr for Areson hardware (identity mapping).
 std::vector<Packet> build_button_mapping(
-    const std::map<uint8_t, ActionBytes>& changes);
+    const std::map<uint8_t, ActionBytes>& changes,
+    const uint8_t* layout = nullptr);
 
 // DPI settings for build_dpi_packets.
 // value == 0 → keep the template default for that slot.
