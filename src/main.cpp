@@ -181,9 +181,10 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
             if (cfg.dpi[i].color != 0xFFFFFFFF) any_color = true;
 
         if (any_color) {
-            int n_slots = 1;
+            std::array<bool, 5> enabled_bits;
             for (int i = 0; i < 5; ++i)
-                if (cfg.dpi[i].enabled) n_slots = i + 1;
+                enabled_bits[i] = cfg.dpi[i].enabled;
+            int n_slots = compx_active_dpi_stage_count(enabled_bits);
 
             uint32_t colors[5];
             uint32_t global = cfg.led.set

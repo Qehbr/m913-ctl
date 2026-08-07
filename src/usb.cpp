@@ -103,6 +103,17 @@ void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
             std::string("Control transfer (send) failed: ") +
             libusb_strerror(static_cast<libusb_error>(r)));
     }
+    // libusb_control_transfer returns the number of bytes actually
+    // transferred on success (not necessarily all of them) -- a short
+    // write here previously went unnoticed, and callers waiting for a
+    // device ACK would blame the resulting timeout on device latency
+    // rather than a truncated SET_REPORT.
+    if (r != M913_PACKET_SIZE) {
+        std::ostringstream oss;
+        oss << "Control transfer (send) wrote only " << r << " of "
+            << M913_PACKET_SIZE << " bytes";
+        throw std::runtime_error(oss.str());
+    }
 }
 
 void UsbMouse::recv(uint8_t data[M913_PACKET_SIZE]) {

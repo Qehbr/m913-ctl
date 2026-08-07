@@ -634,14 +634,17 @@ std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi) {
     // byte[7] = 0x55 - count. Same control as the original hardware; the
     // Compx device honours it (disabling cascades from the top down, so
     // dpi2_enable=0 yields a single active stage).
-    uint8_t count = 0x05, comp = 0x50;
-    if (!dpi.enabled[4]) { count = 0x04; comp = 0x51; }
-    if (!dpi.enabled[3]) { count = 0x03; comp = 0x52; }
-    if (!dpi.enabled[2]) { count = 0x02; comp = 0x53; }
-    if (!dpi.enabled[1]) { count = 0x01; comp = 0x54; }
+    uint8_t count = static_cast<uint8_t>(compx_active_dpi_stage_count(dpi.enabled));
+    uint8_t comp = static_cast<uint8_t>((0x55u - count) & 0xFF);
     result.push_back(compx_packet(0x02, 0x02, count, comp, 0x00, 0x00));
 
     return result;
+}
+
+int compx_active_dpi_stage_count(const std::array<bool, 5>& enabled) {
+    for (int i = 1; i < 5; ++i)
+        if (!enabled[i]) return i;
+    return 5;
 }
 
 std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots) {
