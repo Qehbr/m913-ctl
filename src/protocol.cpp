@@ -385,6 +385,19 @@ std::vector<Packet> build_button_mapping(
                         evts.push_back(0x41); evts.push_back(keys[i]); evts.push_back(0x00);
                     }
 
+                    // The two sub-packets below have a fixed 17-byte size: packet 1
+                    // carries the first 9 event bytes (p1[7..15]), packet 2 carries
+                    // the rest plus a 1-byte inner checksum in p2[6..15] -- 10 bytes
+                    // total, so at most 9 more event bytes fit. That caps evts at
+                    // 9 + 9 = 18 bytes = 6 events = (modifier count + key count) <= 3,
+                    // matching the "max 3 keys" combo limit documented in README.md.
+                    // This was previously unenforced: exceeding it wrote past the
+                    // end of p2 (a std::array<uint8_t,17>), corrupting the stack.
+                    if (evts.size() > 18)
+                        throw std::runtime_error(
+                            "key combination has too many modifiers+keys combined "
+                            "(max 3 total -- see README.md)");
+
                     uint8_t count = static_cast<uint8_t>(evts.size() / 3);
 
                     // Inner checksum covers COUNT + all event bytes
