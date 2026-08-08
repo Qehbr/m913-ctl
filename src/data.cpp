@@ -230,6 +230,21 @@ bool parse_action(const std::string& action_raw, ActionBytes& out) {
     }
 }
 
+size_t action_combo_tokens(const ActionBytes& action) {
+    // Only keyboard bindings (0x90) are encoded as HID event lists; every
+    // other action type is a fixed 4-byte code with no capacity limit.
+    if (action[0] != 0x90) return 0;
+
+    size_t tokens = 0;
+    for (uint8_t bits = action[1]; bits; bits &= bits - 1)
+        ++tokens;                                  // one per set modifier bit
+
+    if (action[3] > 1)            tokens += action[3];  // multi-key: byte 3 = key count
+    else if (action[2] != 0x00)   tokens += 1;          // single key
+
+    return tokens;
+}
+
 bool parse_multikey(const std::string& action, uint8_t& mods, std::vector<uint8_t>& keys) {
     std::string lower_action = to_lower(action);
     auto parts = split(lower_action, '+');

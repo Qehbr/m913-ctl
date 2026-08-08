@@ -31,5 +31,13 @@ bool parse_action(const std::string& action, ActionBytes& out);
 // Returns list of key codes for a multi-key combination like "a+b+c"
 bool parse_multikey(const std::string& action, uint8_t& mods, std::vector<uint8_t>& keys);
 
+// Number of modifiers + keys a parsed action combines ("ctrl+shift+z" → 3).
+// Returns 0 for actions that are not keyboard bindings (mouse buttons, DPI
+// controls, multimedia, fire), which have no such limit.
+//
+// Compare against MAX_COMBO_TOKENS (protocol.h) to reject a binding before
+// any packet is built — the packet builder cannot fit more than that.
+size_t action_combo_tokens(const ActionBytes& action);
+
 // Print all recognized action names to stdout (for --list-actions)
 void list_actions();

@@ -385,18 +385,22 @@ std::vector<Packet> build_button_mapping(
                         evts.push_back(0x41); evts.push_back(keys[i]); evts.push_back(0x00);
                     }
 
-                    // The two sub-packets below have a fixed 17-byte size: packet 1
-                    // carries the first 9 event bytes (p1[7..15]), packet 2 carries
-                    // the rest plus a 1-byte inner checksum in p2[6..15] -- 10 bytes
-                    // total, so at most 9 more event bytes fit. That caps evts at
-                    // 9 + 9 = 18 bytes = 6 events = (modifier count + key count) <= 3,
-                    // matching the "max 3 keys" combo limit documented in README.md.
-                    // This was previously unenforced: exceeding it wrote past the
-                    // end of p2 (a std::array<uint8_t,17>), corrupting the stack.
-                    if (evts.size() > 18)
+                    // Guard the fixed capacity of the two sub-packets below
+                    // (see COMBO_* in protocol.h).  Callers are expected to have
+                    // rejected oversized bindings already — validate_config() and
+                    // the --button parser both check action_combo_tokens() before
+                    // anything is sent — so reaching this is a programming error
+                    // rather than bad user input.  It stays as defence in depth:
+                    // build_button_mapping() is public, and going over used to
+                    // write past the end of p2 (a std::array<uint8_t,17>).
+                    if (evts.size() > COMBO_MAX_EVENT_BYTES) {
+                        clear_multikey_actions();
                         throw std::runtime_error(
-                            "key combination has too many modifiers+keys combined "
-                            "(max 3 total -- see README.md)");
+                            "key combination uses " +
+                            std::to_string(evts.size() / COMBO_BYTES_PER_TOKEN) +
+                            " modifiers+keys — the hardware packet format allows at "
+                            "most " + std::to_string(MAX_COMBO_TOKENS));
+                    }
 
                     uint8_t count = static_cast<uint8_t>(evts.size() / 3);
 
