@@ -17,7 +17,7 @@ struct Config {
         bool     enabled = true;
         uint32_t color   = 0xFFFFFFFF;   // per-slot LED color (Compx); 0xFFFFFFFF = not set
     };
-    DpiConfig dpi[5];  // dpi[0] = dpi1, ..., dpi[4] = dpi5
+    DpiConfig dpi[DPI_SLOTS];  // dpi[0] = dpi1, ..., dpi[4] = dpi5
 
     // [buttons] section: button name → action string
     std::map<std::string, std::string> buttons;

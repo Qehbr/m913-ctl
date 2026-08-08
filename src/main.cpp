@@ -154,13 +154,26 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
         send_sequence(mouse, build_button_mapping(btn_changes, btn_layout), "Button mapping");
 
     // ---- DPI ----
-    bool any_dpi = false;
-    for (int i = 0; i < 5; ++i)
-        if (cfg.dpi[i].value != 0) { any_dpi = true; break; }
+    // A dpiN_enable flag is worth sending on its own for Compx: that path
+    // emits one packet per set DPI value plus a standalone stage-count
+    // packet, so a stage change travels without touching any value. Areson
+    // packs values and stage count into a single template-based sequence, so
+    // sending it with no values would overwrite every slot with the
+    // template's defaults — there the flags can only ride along with a value.
+    //
+    // This also keeps the LED block below honest: the stage count it derives
+    // from enabled[] is only true of the device once those flags have been
+    // sent. With Compx now always sending them, the two cannot disagree.
+    bool any_dpi_value = false, any_dpi_disabled = false;
+    for (int i = 0; i < DPI_SLOTS; ++i) {
+        if (cfg.dpi[i].value != 0) any_dpi_value    = true;
+        if (!cfg.dpi[i].enabled)   any_dpi_disabled = true;
+    }
+    bool send_dpi = any_dpi_value || (is_compx && any_dpi_disabled);
 
-    if (any_dpi) {
+    if (send_dpi) {
         DpiSettings dpi;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < DPI_SLOTS; ++i) {
             dpi.values[i]  = cfg.dpi[i].value;
             dpi.enabled[i] = cfg.dpi[i].enabled;
         }
@@ -177,19 +190,20 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
         //                       (mode=off → black)
         //   dpiN_color keys  → override individual slots, take precedence
         bool any_color = cfg.led.set;
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < DPI_SLOTS; ++i)
             if (cfg.dpi[i].color != 0xFFFFFFFF) any_color = true;
 
         if (any_color) {
-            int n_slots = 1;
-            for (int i = 0; i < 5; ++i)
-                if (cfg.dpi[i].enabled) n_slots = i + 1;
+            std::array<bool, DPI_SLOTS> enabled_bits;
+            for (int i = 0; i < DPI_SLOTS; ++i)
+                enabled_bits[i] = cfg.dpi[i].enabled;
+            int n_slots = compx_active_dpi_stage_count(enabled_bits);
 
-            uint32_t colors[5];
+            uint32_t colors[DPI_SLOTS];
             uint32_t global = cfg.led.set
                 ? ((cfg.led.mode == LedMode::Off) ? 0x000000 : cfg.led.color)
                 : 0xFFFFFFFF;
-            for (int i = 0; i < 5; ++i)
+            for (int i = 0; i < DPI_SLOTS; ++i)
                 colors[i] = (cfg.dpi[i].color != 0xFFFFFFFF) ? cfg.dpi[i].color : global;
 
             send_sequence(mouse, build_compx_color_packets(colors, n_slots), "LED color");
@@ -659,9 +673,16 @@ int main(int argc, char* argv[]) {
                 goto cleanup;
             }
             if (is_compx) {
+                // All five stages, deliberately: --led carries no DPI info and
+                // the active stage count cannot be read back, so there is no
+                // enabled[] to derive a smaller number from here. Colouring an
+                // inactive stage is harmless; missing an active one would leave
+                // it lit with its old colour (very visible for --led off).
                 uint32_t slot_color = (mode == LedMode::Off) ? 0x000000 : 0x00ff00;
-                uint32_t colors[5] = {slot_color, slot_color, slot_color, slot_color, slot_color};
-                send_sequence(mouse, build_compx_color_packets(colors, 5), "LED color");
+                uint32_t colors[DPI_SLOTS] = {slot_color, slot_color, slot_color,
+                                             slot_color, slot_color};
+                send_sequence(mouse, build_compx_color_packets(colors, DPI_SLOTS),
+                              "LED color");
             } else {
                 send_sequence(mouse, build_led_packets(mode), "LED mode");
             }

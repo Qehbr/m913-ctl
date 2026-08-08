@@ -130,13 +130,19 @@ std::vector<Packet> build_button_mapping(
     const std::map<uint8_t, ActionBytes>& changes,
     const uint8_t* layout = nullptr);
 
+// DPI slots the M913 exposes. Same on both hardware revisions — this is the
+// size of the config's DPI arrays, distinct from the number of stages the
+// Compx firmware currently has *active* (compx_active_dpi_stage_count()).
+static constexpr int DPI_SLOTS = 5;
+
 // DPI settings for build_dpi_packets.
 // value == 0 → keep the template default for that slot.
 struct DpiSettings {
-    std::array<uint16_t, 5> values  = {0, 0, 0, 0, 0};
-    std::array<bool,     5> enabled = {true, true, true, true, true};
+    std::array<uint16_t, DPI_SLOTS> values  = {0, 0, 0, 0, 0};
+    std::array<bool,     DPI_SLOTS> enabled = {true, true, true, true, true};
     // Per-slot RGB colors for Compx hardware (0xFFFFFFFF = not set / use default)
-    std::array<uint32_t, 5> colors  = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
+    std::array<uint32_t, DPI_SLOTS> colors  = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+                                               0xFFFFFFFF, 0xFFFFFFFF};
 };
 
 // Build the complete DPI packet sequence (4 DPI config packets +
@@ -164,11 +170,27 @@ Packet build_polling_rate_packet(uint16_t hz);
 // Values of 0 for a slot leave that slot unchanged.
 std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi);
 
+// Number of DPI stages that will actually be active on Compx hardware
+// for a given per-slot enabled[] pattern. The device does NOT support an
+// arbitrary per-slot bitmask -- it only cascades stages off from the top,
+// starting at the first disabled slot found scanning from stage 2 (stage
+// 1/index 0 can never be disabled). So e.g. enabled = {t,f,t,t,t} yields
+// only 1 truly active stage, not the 4 slots individually marked
+// enabled=true. build_compx_dpi_packets() encodes this cascade into the
+// device's stage-count packet; anything deriving a stage count from the
+// same enabled[] must use this function rather than reading the array
+// itself, or the two will disagree on non-contiguous patterns.
+int compx_active_dpi_stage_count(const std::array<bool, DPI_SLOTS>& enabled);
+
 // Build per-slot color packets for Compx hardware.
-// colors[5]: one 0xRRGGBB per slot; 0x000000 = LED off for that slot.
+// colors:    one 0xRRGGBB per slot (DPI_SLOTS entries); 0x000000 = LED off for that slot.
 //            0xFFFFFFFF = skip this slot (no packet sent).
-// n_slots: number of active DPI slots (1–5).
-std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots);
+// n_slots: how many stages to colour (1–DPI_SLOTS). Derive it with
+//          compx_active_dpi_stage_count() when an enabled[] pattern is
+//          available; pass DPI_SLOTS when it is not (see --led in main),
+//          since the active count cannot be read back from the device and
+//          missing an active stage leaves it showing its previous colour.
+std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], int n_slots);
 
 // -----------------------------------------------------------------------
 // Helpers

@@ -118,7 +118,7 @@ Config parse_config_file(const std::string& path) {
     int lineno = 0;
 
     // Pre-initialize DPI slots so that missing entries keep defaults
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < DPI_SLOTS; ++i) {
         cfg.dpi[i].enabled = true;
         cfg.dpi[i].value   = 0;  // 0 = not configured
     }
@@ -248,7 +248,7 @@ void validate_config(const Config& cfg) {
                 std::to_string(r) + ")");
     }
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < DPI_SLOTS; ++i) {
         uint16_t v = cfg.dpi[i].value;
         if (v == 0) continue;  // not configured, skip
         if (v < 100 || v > 16000 || v % 100 != 0)
