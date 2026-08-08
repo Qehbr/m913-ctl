@@ -155,12 +155,12 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
 
     // ---- DPI ----
     bool any_dpi = false;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < DPI_SLOTS; ++i)
         if (cfg.dpi[i].value != 0) { any_dpi = true; break; }
 
     if (any_dpi) {
         DpiSettings dpi;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < DPI_SLOTS; ++i) {
             dpi.values[i]  = cfg.dpi[i].value;
             dpi.enabled[i] = cfg.dpi[i].enabled;
         }
@@ -177,20 +177,20 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
         //                       (mode=off → black)
         //   dpiN_color keys  → override individual slots, take precedence
         bool any_color = cfg.led.set;
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < DPI_SLOTS; ++i)
             if (cfg.dpi[i].color != 0xFFFFFFFF) any_color = true;
 
         if (any_color) {
-            std::array<bool, 5> enabled_bits;
-            for (int i = 0; i < 5; ++i)
+            std::array<bool, DPI_SLOTS> enabled_bits;
+            for (int i = 0; i < DPI_SLOTS; ++i)
                 enabled_bits[i] = cfg.dpi[i].enabled;
             int n_slots = compx_active_dpi_stage_count(enabled_bits);
 
-            uint32_t colors[5];
+            uint32_t colors[DPI_SLOTS];
             uint32_t global = cfg.led.set
                 ? ((cfg.led.mode == LedMode::Off) ? 0x000000 : cfg.led.color)
                 : 0xFFFFFFFF;
-            for (int i = 0; i < 5; ++i)
+            for (int i = 0; i < DPI_SLOTS; ++i)
                 colors[i] = (cfg.dpi[i].color != 0xFFFFFFFF) ? cfg.dpi[i].color : global;
 
             send_sequence(mouse, build_compx_color_packets(colors, n_slots), "LED color");
@@ -642,8 +642,10 @@ int main(int argc, char* argv[]) {
                 // inactive stage is harmless; missing an active one would leave
                 // it lit with its old colour (very visible for --led off).
                 uint32_t slot_color = (mode == LedMode::Off) ? 0x000000 : 0x00ff00;
-                uint32_t colors[5] = {slot_color, slot_color, slot_color, slot_color, slot_color};
-                send_sequence(mouse, build_compx_color_packets(colors, 5), "LED color");
+                uint32_t colors[DPI_SLOTS] = {slot_color, slot_color, slot_color,
+                                             slot_color, slot_color};
+                send_sequence(mouse, build_compx_color_packets(colors, DPI_SLOTS),
+                              "LED color");
             } else {
                 send_sequence(mouse, build_led_packets(mode), "LED mode");
             }
