@@ -237,6 +237,28 @@ m913-ctl --probe-commands  # probe which command bytes the device answers
 m913-ctl --raw-send HEX    # send raw packet for debugging
 ```
 
+## Development
+
+Build, then run the regression suite:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+./tests/regress.sh                  # offline checks + device checks
+OFFLINE_ONLY=1 ./tests/regress.sh   # never opens the mouse
+```
+
+For changes that affect what the mouse actually transmits, there is an
+interactive check that decodes the device's own HID reports:
+
+```bash
+python3 tests/verify-hardware.py
+```
+
+Both **rewrite the mouse's stored configuration** and restore
+`examples/example.ini` at the end. See [docs/TESTING.md](docs/TESTING.md) for
+what they cover, how to read the report dumps, and how to recover a mouse whose
+kernel driver was left detached.
+
 ## Acknowledgments
 
 Protocol knowledge derived from [mouse_m908](https://github.com/dokutan/mouse_m908) by dokutan.
