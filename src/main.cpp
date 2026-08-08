@@ -154,11 +154,24 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
         send_sequence(mouse, build_button_mapping(btn_changes, btn_layout), "Button mapping");
 
     // ---- DPI ----
-    bool any_dpi = false;
-    for (int i = 0; i < DPI_SLOTS; ++i)
-        if (cfg.dpi[i].value != 0) { any_dpi = true; break; }
+    // A dpiN_enable flag is worth sending on its own for Compx: that path
+    // emits one packet per set DPI value plus a standalone stage-count
+    // packet, so a stage change travels without touching any value. Areson
+    // packs values and stage count into a single template-based sequence, so
+    // sending it with no values would overwrite every slot with the
+    // template's defaults — there the flags can only ride along with a value.
+    //
+    // This also keeps the LED block below honest: the stage count it derives
+    // from enabled[] is only true of the device once those flags have been
+    // sent. With Compx now always sending them, the two cannot disagree.
+    bool any_dpi_value = false, any_dpi_disabled = false;
+    for (int i = 0; i < DPI_SLOTS; ++i) {
+        if (cfg.dpi[i].value != 0) any_dpi_value    = true;
+        if (!cfg.dpi[i].enabled)   any_dpi_disabled = true;
+    }
+    bool send_dpi = any_dpi_value || (is_compx && any_dpi_disabled);
 
-    if (any_dpi) {
+    if (send_dpi) {
         DpiSettings dpi;
         for (int i = 0; i < DPI_SLOTS; ++i) {
             dpi.values[i]  = cfg.dpi[i].value;
