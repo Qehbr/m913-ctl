@@ -81,6 +81,26 @@ using Packet = std::array<uint8_t, M913_PACKET_SIZE>;
 using ActionBytes = std::array<uint8_t, 4>;
 
 // -----------------------------------------------------------------------
+// Keyboard-combo capacity
+//
+// A keyboard binding is stored on the mouse as a list of HID events, three
+// bytes each (event type, value, 0x00), split across two 17-byte sub-packets:
+// the first carries 9 event bytes (p1[7..15]), the second 9 more plus a
+// 1-byte inner checksum (p2[6..15]).  Every modifier and every key emits two
+// events — one down, one up — so the 18-byte capacity works out to a hard
+// limit of MAX_COMBO_TOKENS modifiers and keys combined.
+//
+// These are the single source of truth for that limit: the packet builder
+// checks against the byte capacity, the input validators check against the
+// token count, and the user-facing messages quote it. Nothing restates it.
+// -----------------------------------------------------------------------
+static constexpr size_t COMBO_P1_EVENT_BYTES  = 9;
+static constexpr size_t COMBO_P2_EVENT_BYTES  = 9;
+static constexpr size_t COMBO_MAX_EVENT_BYTES = COMBO_P1_EVENT_BYTES + COMBO_P2_EVENT_BYTES;
+static constexpr size_t COMBO_BYTES_PER_TOKEN = 6;  // 2 events × 3 bytes
+static constexpr size_t MAX_COMBO_TOKENS      = COMBO_MAX_EVENT_BYTES / COMBO_BYTES_PER_TOKEN;
+
+// -----------------------------------------------------------------------
 // Packet sequence builders
 //
 // Each builder returns a std::vector<Packet> containing all the packets

@@ -266,5 +266,12 @@ void validate_config(const Config& cfg) {
         if (!parse_action(action, ab))
             throw std::runtime_error(
                 "Unknown action '" + action + "' for button " + key);
+
+        size_t tokens = action_combo_tokens(ab);
+        if (tokens > MAX_COMBO_TOKENS)
+            throw std::runtime_error(
+                "Action '" + action + "' for button " + key + " combines " +
+                std::to_string(tokens) + " modifiers+keys — the mouse stores at "
+                "most " + std::to_string(MAX_COMBO_TOKENS) + " per binding");
     }
 }
