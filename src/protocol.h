@@ -151,17 +151,19 @@ std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi);
 // 1/index 0 can never be disabled). So e.g. enabled = {t,f,t,t,t} yields
 // only 1 truly active stage, not the 4 slots individually marked
 // enabled=true. build_compx_dpi_packets() encodes this cascade into the
-// device's stage-count packet; anything that needs to know how many
-// stages will really be active (e.g. how many LED color packets to send)
-// must use this same function rather than re-deriving its own count from
-// enabled[], or the two will disagree on non-contiguous patterns.
+// device's stage-count packet; anything deriving a stage count from the
+// same enabled[] must use this function rather than reading the array
+// itself, or the two will disagree on non-contiguous patterns.
 int compx_active_dpi_stage_count(const std::array<bool, 5>& enabled);
 
 // Build per-slot color packets for Compx hardware.
 // colors[5]: one 0xRRGGBB per slot; 0x000000 = LED off for that slot.
 //            0xFFFFFFFF = skip this slot (no packet sent).
-// n_slots: number of active DPI slots (1–5) -- use
-//          compx_active_dpi_stage_count() to compute this correctly.
+// n_slots: how many stages to colour (1–5). Derive it with
+//          compx_active_dpi_stage_count() when an enabled[] pattern is
+//          available; pass 5 when it is not (see the --led path in main),
+//          since the active count cannot be read back from the device and
+//          missing an active stage leaves it showing its previous colour.
 std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots);
 
 // -----------------------------------------------------------------------
