@@ -9,8 +9,6 @@
 // Parsed representation of an INI configuration file.
 // All values are stored as strings and validated when applied.
 struct Config {
-    Profile profile = Profile::P1;
-
     // [dpi] section
     struct DpiConfig {
         uint16_t value   = 0;            // 0 means "not set"
@@ -42,8 +40,10 @@ struct Config {
 // Throws std::runtime_error if the file cannot be read or has syntax errors.
 Config parse_config_file(const std::string& path);
 
-// Validate a parsed Config and throw std::runtime_error if any value is out of range.
-void validate_config(const Config& cfg);
+// Validate a parsed Config and throw std::runtime_error if any value is out of
+// range. is_compx selects the DPI rules: the two revisions accept different
+// value sets, so this can only run once the device has been identified.
+void validate_config(const Config& cfg, bool is_compx);
 
 // Map INI button names to Button enum values.
 // Returns false if the name is not recognized.

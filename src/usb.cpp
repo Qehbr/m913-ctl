@@ -238,9 +238,20 @@ void UsbMouse::_claim_interface(int iface, bool& detached_flag) {
     }
 }
 
-void UsbMouse::_release_interface(int iface, bool detached_flag) {
+void UsbMouse::_release_interface(int iface, bool /*detached_flag*/) {
     libusb_release_interface(_handle, iface);
-    if (detached_flag) {
-        libusb_attach_kernel_driver(_handle, iface);
-    }
+
+    // Always try to reattach, not only when this process did the detaching.
+    //
+    // If a previous run was killed before it could clean up (SIGKILL, a crash,
+    // or — before stop handlers covered SIGTERM — any plain `kill`), the
+    // interface is left with no driver bound and the mouse stops working.
+    // Reattaching only when _detached_flag was set made that state permanent:
+    // the next run sees no active driver, so it never sets the flag, so it
+    // never reattaches either. Replugging was the only way out.
+    //
+    // Attaching when a driver is already bound just returns LIBUSB_ERROR_BUSY,
+    // and LIBUSB_ERROR_NOT_FOUND if there is nothing to attach, so ignoring
+    // the result is safe and makes every run self-healing.
+    libusb_attach_kernel_driver(_handle, iface);
 }

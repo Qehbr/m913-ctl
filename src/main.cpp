@@ -14,8 +14,24 @@
 #include "protocol.h"
 #include "usb.h"
 
-static volatile bool g_stop = false;
-static void handle_sigint(int) { g_stop = true; }
+static volatile sig_atomic_t g_stop = 0;
+static void handle_stop(int) { g_stop = 1; }
+
+// Install the stop handler for both SIGINT and SIGTERM.
+//
+// SIGTERM matters as much as SIGINT here: its default action terminates the
+// process outright, so UsbMouse::close() never runs and the kernel HID driver
+// is left detached — the mouse stops working entirely until it is replugged.
+// Anything that kills the tool without a terminal (a script, a service
+// manager, a wrapper calling Popen.terminate()) sends SIGTERM, not SIGINT.
+//
+// The handler only raises a flag. The listen loops poll it and exit cleanly;
+// a config write in progress finishes its packet sequence first, which is
+// deliberate — a half-applied config is worse than a second's delay.
+static void install_stop_handlers() {
+    std::signal(SIGINT,  handle_stop);
+    std::signal(SIGTERM, handle_stop);
+}
 
 // -----------------------------------------------------------------------
 // Version
@@ -53,8 +69,8 @@ Options:
 
   --list-actions           Print all valid button action names and exit
 
-  --profile N              Target profile 1 or 2 (default: 1; note: the
-                           M913 only fully supports profile 1 via USB)
+  --probe-commands         Probe which command bytes the device responds to
+                           (reverse-engineering aid)
 
   --raw-send HEX           Send a raw packet and stay in listen mode.
                            HEX = space-separated bytes (up to 16).
@@ -244,7 +260,6 @@ int main(int argc, char* argv[]) {
         {"led",          required_argument, nullptr, 1002},
         {"button",       required_argument, nullptr, 1003},
         {"list-actions",  no_argument,       nullptr, 1004},
-        {"profile",       required_argument, nullptr, 1005},
         {"polling-rate",  required_argument, nullptr, 1011},
         {nullptr, 0, nullptr, 0}
     };
@@ -256,7 +271,6 @@ int main(int argc, char* argv[]) {
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
     std::string raw_send_hex;
-    Profile     profile      = Profile::P1;
 
     struct DpiArg  { int slot; uint16_t value; };
     struct BtnArg  { std::string name; std::string action; };
@@ -291,14 +305,17 @@ int main(int argc, char* argv[]) {
             try {
                 int slot = std::stoi(arg.substr(0, eq));
                 int val  = std::stoi(arg.substr(eq + 1));
-                if (slot < 1 || slot > 5) {
-                    std::cerr << "Error: DPI slot must be 1-5\n";
+                if (slot < 1 || slot > DPI_SLOTS) {
+                    std::cerr << "Error: DPI slot must be 1-" << DPI_SLOTS << "\n";
                     return 1;
                 }
-                if (val < 100 || val > 16000 || val % 100 != 0) {
-                    std::cerr << "Error: DPI value must be 100-16000 in steps of 100\n";
+                if (val <= 0 || val > 65535) {
+                    std::cerr << "Error: DPI value out of range\n";
                     return 1;
                 }
+                // Which values are actually supported depends on the hardware
+                // revision, which is not known until the device is opened —
+                // checked below, before anything is sent.
                 dpi_args.push_back({slot, static_cast<uint16_t>(val)});
             } catch (...) {
                 std::cerr << "Error: invalid --dpi argument: " << arg << "\n";
@@ -331,18 +348,26 @@ int main(int argc, char* argv[]) {
             list_actions();
             return 0;
 
-        case 1006:  // --listen [EP]
+        case 1006: {  // --listen [EP]
             do_listen = true;
-            if (optarg) {
+            // getopt only fills optarg for an optional argument when it is
+            // attached as --listen=0x82. The help text shows the separated
+            // form, and that used to be accepted and then silently ignored,
+            // so take the next argv too when it looks like an endpoint.
+            const char* ep = optarg;
+            if (!ep && optind < argc && argv[optind][0] != '-')
+                ep = argv[optind++];
+            if (ep) {
                 try {
-                    listen_ep = std::stoi(optarg, nullptr, 16);
+                    listen_ep = std::stoi(ep, nullptr, 16);
                 } catch (...) {
-                    std::cerr << "Error: invalid endpoint '" << optarg
+                    std::cerr << "Error: invalid endpoint '" << ep
                               << "' (expect hex, e.g. 0x81)\n";
                     return 1;
                 }
             }
             break;
+        }
 
         case 1007:  // --probe
             do_probe = true;
@@ -370,21 +395,6 @@ int main(int argc, char* argv[]) {
             }
             break;
         }
-
-        case 1005:  // --profile N
-            try {
-                int p = std::stoi(optarg);
-                if (p == 1) profile = Profile::P1;
-                else if (p == 2) profile = Profile::P2;
-                else {
-                    std::cerr << "Error: --profile must be 1 or 2\n";
-                    return 1;
-                }
-            } catch (...) {
-                std::cerr << "Error: invalid --profile argument\n";
-                return 1;
-            }
-            break;
 
         default:
             std::cerr << "Use --help for usage.\n";
@@ -427,6 +437,10 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    // Install before the device is opened, so every path that can claim a USB
+    // interface is covered by the cleanup on the way out.
+    install_stop_handlers();
+
     // ---- open mouse ----
     UsbMouse mouse;
     const uint8_t* btn_layout = nullptr;
@@ -454,6 +468,20 @@ int main(int argc, char* argv[]) {
         btn_layout = is_compx ? COMPX_LAYOUT : nullptr;
         if (is_compx)
             mouse.set_ctrl_value(0x0208);  // Compx uses output report, not feature report
+
+        // Now that the revision is known, check the --dpi values against what
+        // this hardware can actually store. Done before any packet is sent so
+        // an unsupported value cannot leave a partly-applied config behind.
+        for (auto& [slot, val] : dpi_args) {
+            if (!dpi_value_supported(val, is_compx)) {
+                std::cerr << "Error: DPI " << val << " is not supported by this "
+                          << (is_compx ? "(Compx)" : "(Areson)") << " hardware"
+                          << " — nearest supported value is "
+                          << nearest_supported_dpi(val, is_compx) << "\n";
+                mouse.close();
+                return 1;
+            }
+        }
 
         std::cout << "Connected (" << std::hex
                   << std::setw(4) << std::setfill('0') << vid << ":"
@@ -562,7 +590,6 @@ int main(int argc, char* argv[]) {
 
             // Stay in listen mode so the user can verify the effect without
             // needing a second terminal.
-            std::signal(SIGINT, handle_sigint);
             std::cout << "\nPacket sent. Press buttons to verify effect. Ctrl+C to stop.\n\n";
             struct EpInfo { uint8_t addr; int maxpkt; };
             const EpInfo verify_eps[] = { {0x81, 7}, {0x82, 17} };
@@ -590,7 +617,6 @@ int main(int argc, char* argv[]) {
 
         // ---- --listen ----
         if (do_listen) {
-            std::signal(SIGINT, handle_sigint);
 
             struct EpInfo { uint8_t addr; int maxpkt; };
             const EpInfo known_eps[] = { {0x81, 7}, {0x82, 17} };
@@ -635,8 +661,7 @@ int main(int argc, char* argv[]) {
         if (!config_file.empty()) {
             std::cout << "=== Applying config: " << config_file << " ===\n";
             Config cfg = parse_config_file(config_file);
-            cfg.profile = profile;
-            validate_config(cfg);
+            validate_config(cfg, is_compx);
             apply_config(mouse, cfg, btn_layout, is_compx);
             did_config = true;
         }

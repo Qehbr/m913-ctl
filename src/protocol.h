@@ -149,6 +149,25 @@ struct DpiSettings {
 // 3 "unknown_2" packets that must always follow, = 7 total).
 std::vector<Packet> build_dpi_packets(const DpiSettings& dpi);
 
+// Compx encodes DPI arithmetically as (value / 50) - 1, so it accepts any
+// multiple of 50 in this range. Areson has no formula — it can only store the
+// discrete values in its encoding table, which is NOT every multiple of 100.
+static constexpr uint16_t COMPX_DPI_MIN  = 50;
+static constexpr uint16_t COMPX_DPI_MAX  = 12750;
+static constexpr uint16_t COMPX_DPI_STEP = 50;
+
+// True if this hardware can actually store the given DPI value.
+//
+// Validate with this rather than a step rule. A "multiple of 100" test is
+// wrong in both directions: it rejects the 50-step values Compx supports, and
+// it accepts 105 values Areson has no encoding for — which build_dpi_packets()
+// then silently drops, leaving the slot at whatever the template held.
+bool dpi_value_supported(uint16_t dpi, bool is_compx);
+
+// Closest value the hardware can store. Only for building error messages,
+// since the supported set has large gaps at the top of the Areson range.
+uint16_t nearest_supported_dpi(uint16_t dpi, bool is_compx);
+
 // Build the LED configuration packet sequence (1–2 packets).
 // color: 24-bit RGB (0xRRGGBB), brightness: 0–255 (Steady mode only)
 // speed: 1–5 (Respiration mode, 1=slowest, 5=fastest)

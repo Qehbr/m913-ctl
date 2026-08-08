@@ -21,7 +21,7 @@ The Compx revision differs in a few ways — see [Compx hardware notes](#compx-h
 - **Key combinations** — modifier+key (`ctrl+c`), multi-key (`a+b`, max 3 keys)
 - **Multimedia keys** — play, next, prev, stop, volume, mute, email, calculator, browser controls
 - **Fire button** — configurable speed and repeat count
-- **DPI profiles** — 5 slots (Areson: 100–16000 in steps of 100; Compx: steps of 50)
+- **DPI profiles** — 5 slots (Areson: fixed set up to 16000; Compx: any multiple of 50 up to 12750)
 - **LED** — Areson: off/steady/respiration/rainbow modes; Compx: per-DPI-stage RGB color
 - **Polling rate** — 125, 250, 500, or 1000 Hz
 - **Config files** — INI format for saving and sharing configurations
@@ -102,6 +102,11 @@ m913-ctl --list-actions
 
 > **Note:** Each invocation sends a complete button mapping to the mouse — buttons not mentioned are reset to their defaults. To remap multiple buttons, pass all `--button` flags in a single command. For a full persistent setup, use a config file.
 
+> **`(no ACK within 1.5s)`?** The acknowledgement comes from the mouse itself over
+> the wireless link, and an idle mouse throttles its radio, so replies often
+> arrive too late. The settings still apply. Keep the mouse moving while the
+> command runs and the ACKs come back.
+
 ### Config file
 
 ```ini
@@ -170,6 +175,11 @@ See [examples/example.ini](examples/example.ini) for a complete example.
 ### Keyboard keys
 All standard keys: `a`–`z`, `0`–`9`, `f1`–`f24`, `enter`, `space`, `tab`, `backspace`, `esc`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, arrow keys, numpad keys, etc.
 
+> **Arrow keys:** `left` and `right` are mouse-button names, so on their own they
+> bind a mouse click. Use `arrow_left` / `arrow_right` (and `arrow_up` /
+> `arrow_down`) to bind the arrow keys. Inside a combo the plain names work
+> fine — `ctrl+left` is the arrow key.
+
 ### Key combinations
 
 A binding may combine **at most 3 modifiers and keys in total**. The mouse
@@ -197,7 +207,10 @@ These apply to the **original (Areson)** hardware. For the Compx revision, see b
 The newer Compx revision (`3554:f55d` / `3554:f55e`) is auto-detected and uses the
 same commands, with a few differences:
 
-- **DPI** steps are 50 (e.g. `400`, `450`, `500`), not 100.
+- **DPI** is any multiple of 50 from 50 to 12750 (e.g. `400`, `450`, `500`).
+  Areson instead has a fixed table of supported values reaching 16000 — it is
+  not every multiple of 100, and an unsupported value is now rejected with the
+  nearest supported one rather than silently ignored.
 - **LED is per DPI stage** — there are no global modes. Each DPI stage has its own
   RGB color, set with `dpiN_color` in the `[dpi]` section. `000000` turns that
   stage's LED off. The `[led]` section, if present, applies one color (or `off`)
@@ -217,10 +230,34 @@ See [examples/example_compx.ini](examples/example_compx.ini) for a complete exam
 ## Diagnostics
 
 ```bash
-m913-ctl --probe          # show USB interfaces and endpoints
-m913-ctl --listen         # listen for mouse packets (Ctrl+C to stop)
-m913-ctl --raw-send HEX   # send raw packet for debugging
+m913-ctl --probe           # show USB interfaces and endpoints
+m913-ctl --listen          # listen on both endpoints (Ctrl+C to stop)
+m913-ctl --listen 0x82     # listen on one endpoint only
+m913-ctl --probe-commands  # probe which command bytes the device answers
+m913-ctl --raw-send HEX    # send raw packet for debugging
 ```
+
+## Development
+
+Build, then run the regression suite:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+./tests/regress.sh                  # offline checks + device checks
+OFFLINE_ONLY=1 ./tests/regress.sh   # never opens the mouse
+```
+
+For changes that affect what the mouse actually transmits, there is an
+interactive check that decodes the device's own HID reports:
+
+```bash
+python3 tests/verify-hardware.py
+```
+
+Both **rewrite the mouse's stored configuration** and restore
+`examples/example.ini` at the end. See [docs/TESTING.md](docs/TESTING.md) for
+what they cover, how to read the report dumps, and how to recover a mouse whose
+kernel driver was left detached.
 
 ## Acknowledgments
 

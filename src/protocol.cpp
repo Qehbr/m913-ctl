@@ -466,6 +466,31 @@ std::vector<Packet> build_button_mapping(
 // DPI
 // -----------------------------------------------------------------------
 
+bool dpi_value_supported(uint16_t dpi, bool is_compx) {
+    if (is_compx)
+        return dpi >= COMPX_DPI_MIN && dpi <= COMPX_DPI_MAX &&
+               dpi % COMPX_DPI_STEP == 0;
+    // Areson: the encoding table is the authority, not a step rule.
+    return lookup_dpi(dpi) != nullptr;
+}
+
+uint16_t nearest_supported_dpi(uint16_t dpi, bool is_compx) {
+    if (is_compx) {
+        int v = ((dpi + COMPX_DPI_STEP / 2) / COMPX_DPI_STEP) * COMPX_DPI_STEP;
+        if (v < COMPX_DPI_MIN) v = COMPX_DPI_MIN;
+        if (v > COMPX_DPI_MAX) v = COMPX_DPI_MAX;
+        return static_cast<uint16_t>(v);
+    }
+    uint16_t best = dpi_table[0].dpi;
+    int      best_delta = 0x7fffffff;
+    for (auto& e : dpi_table) {
+        int delta = static_cast<int>(e.dpi) - static_cast<int>(dpi);
+        if (delta < 0) delta = -delta;
+        if (delta < best_delta) { best_delta = delta; best = e.dpi; }
+    }
+    return best;
+}
+
 std::vector<Packet> build_dpi_packets(const DpiSettings& dpi) {
     // Copy the 4-packet template.
     Packet buf[4];
