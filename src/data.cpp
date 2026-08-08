@@ -130,10 +130,14 @@ static const std::map<std::string, uint8_t> key_codes = {
     {"delete",      0x4c},
     {"end",         0x4d},
     {"pagedown",    0x4e},
-    {"right",       0x4f},
-    {"left",        0x50},
-    {"down",        0x51},
-    {"up",          0x52},
+    // Arrow keys. "left" and "right" are also mouse-button action names, and
+    // mouse actions are matched first, so those two are only reachable inside
+    // a combo ("ctrl+left"). The arrow_* aliases make them bindable on their
+    // own; up/down need no alias but are given one for symmetry.
+    {"right",       0x4f}, {"arrow_right", 0x4f},
+    {"left",        0x50}, {"arrow_left",  0x50},
+    {"down",        0x51}, {"arrow_down",  0x51},
+    {"up",          0x52}, {"arrow_up",    0x52},
     // Numpad
     {"num0", 0x62}, {"num1", 0x59}, {"num2", 0x5a}, {"num3", 0x5b},
     {"num4", 0x5c}, {"num5", 0x5d}, {"num6", 0x5e}, {"num7", 0x5f},

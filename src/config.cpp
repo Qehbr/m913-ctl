@@ -24,6 +24,27 @@ static std::string to_lower(std::string s) {
     return s;
 }
 
+// Remove a trailing inline comment: whitespace followed by ';' or '#'.
+//
+// Whole-line comments were already handled, but inline ones were not, so
+// "dpi2_enable=0   ; collapse to one stage" kept the comment as part of the
+// value. That threw a clear error for keys parsed as numbers or actions, but
+// dpiN_enable is tested with (value != "0") — so the comment silently made it
+// true, i.e. the exact opposite of what the line said. README documented that
+// form, so anyone copying it got five DPI stages while believing they had one.
+//
+// The leading-whitespace requirement is what makes this safe for '#':
+// color=#ff0000 is valid syntax (parse_color strips the '#'), and only a
+// space-prefixed '#' is treated as a comment. This matches how most INI
+// parsers behave.
+static std::string strip_inline_comment(const std::string& s) {
+    for (size_t i = 1; i < s.size(); ++i)
+        if ((s[i] == ';' || s[i] == '#') &&
+            (s[i - 1] == ' ' || s[i - 1] == '\t'))
+            return s.substr(0, i);
+    return s;
+}
+
 // -----------------------------------------------------------------------
 // Button name → Button enum
 // -----------------------------------------------------------------------
@@ -132,8 +153,12 @@ Config parse_config_file(const std::string& path) {
         ++lineno;
         line = trim(line);
 
-        // Skip blank lines and comments
+        // Skip blank lines and whole-line comments
         if (line.empty() || line[0] == '#' || line[0] == ';')
+            continue;
+
+        line = trim(strip_inline_comment(line));
+        if (line.empty())
             continue;
 
         std::smatch m;
@@ -239,7 +264,7 @@ Config parse_config_file(const std::string& path) {
 // Validation
 // -----------------------------------------------------------------------
 
-void validate_config(const Config& cfg) {
+void validate_config(const Config& cfg, bool is_compx) {
     if (cfg.mouse.set) {
         uint16_t r = cfg.mouse.polling_rate;
         if (r != 125 && r != 250 && r != 500 && r != 1000)
@@ -251,10 +276,11 @@ void validate_config(const Config& cfg) {
     for (int i = 0; i < DPI_SLOTS; ++i) {
         uint16_t v = cfg.dpi[i].value;
         if (v == 0) continue;  // not configured, skip
-        if (v < 100 || v > 16000 || v % 100 != 0)
+        if (!dpi_value_supported(v, is_compx))
             throw std::runtime_error(
                 "DPI" + std::to_string(i + 1) + " value " + std::to_string(v) +
-                " is out of range (100–16000 in steps of 100)");
+                " is not supported by this hardware (nearest: " +
+                std::to_string(nearest_supported_dpi(v, is_compx)) + ")");
     }
 
     for (auto& [key, action] : cfg.buttons) {
