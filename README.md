@@ -73,6 +73,14 @@ cmake --build build
 sudo cmake --install build
 ```
 
+The version reported by `--version` comes from the nearest git tag. When
+building from a release tarball there is no git history, so pass it explicitly
+— distro packaging should always do this, otherwise the binary reports `dev`:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION=1.0.9
+```
+
 ## Usage
 
 ### Command line

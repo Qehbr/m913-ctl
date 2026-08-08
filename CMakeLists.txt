@@ -5,19 +5,30 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Derive version from the nearest git tag (e.g. v1.0.3 → 1.0.3).
-# Falls back to "dev" when building outside a git repo or without tags.
-execute_process(
-    COMMAND git describe --tags --abbrev=0
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_TAG
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-string(REGEX REPLACE "^v" "" APP_VERSION "${GIT_TAG}")
+# Version, in order of preference:
+#
+#   1. -DAPP_VERSION=x.y.z passed by the caller. Distro packaging builds from a
+#      release tarball, which has no .git, so git describe cannot work there —
+#      the packager already knows the version and passes it in. Note this has
+#      to be checked FIRST: the git branch below assigns APP_VERSION as a
+#      normal variable, which would shadow the -D cache entry and silently
+#      turn a packaged build into "dev".
+#   2. The nearest git tag (v1.0.3 → 1.0.3), for builds from a checkout.
+#   3. "dev", when there is neither.
+if(NOT APP_VERSION)
+    execute_process(
+        COMMAND git describe --tags --abbrev=0
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_TAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    string(REGEX REPLACE "^v" "" APP_VERSION "${GIT_TAG}")
+endif()
 if(NOT APP_VERSION)
     set(APP_VERSION "dev")
 endif()
+message(STATUS "m913-ctl version: ${APP_VERSION}")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
