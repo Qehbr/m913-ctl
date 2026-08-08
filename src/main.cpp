@@ -636,6 +636,11 @@ int main(int argc, char* argv[]) {
                 goto cleanup;
             }
             if (is_compx) {
+                // All five stages, deliberately: --led carries no DPI info and
+                // the active stage count cannot be read back, so there is no
+                // enabled[] to derive a smaller number from here. Colouring an
+                // inactive stage is harmless; missing an active one would leave
+                // it lit with its old colour (very visible for --led off).
                 uint32_t slot_color = (mode == LedMode::Off) ? 0x000000 : 0x00ff00;
                 uint32_t colors[5] = {slot_color, slot_color, slot_color, slot_color, slot_color};
                 send_sequence(mouse, build_compx_color_packets(colors, 5), "LED color");
