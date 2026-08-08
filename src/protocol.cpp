@@ -478,7 +478,7 @@ std::vector<Packet> build_dpi_packets(const DpiSettings& dpi) {
     // mouse_m908 logic: highest disabled level determines the enable bytes.
     // Count how many levels are enabled (must keep at least 1).
     int num_enabled = 0;
-    for (int i = 0; i < 5; ++i) if (dpi.enabled[i]) ++num_enabled;
+    for (int i = 0; i < DPI_SLOTS; ++i) if (dpi.enabled[i]) ++num_enabled;
     if (num_enabled == 0) {
         // Can't disable all levels; leave packet 3 at template default.
     } else {
@@ -622,7 +622,7 @@ std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi) {
 
     // One DPI value packet per slot. Encoding: code = (DPI / 50) - 1,
     // stored in bytes[6] and [7], addr = 0x0c + slot*0x04.
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < DPI_SLOTS; ++i) {
         if (dpi.values[i] == 0) continue;
         uint8_t addr = static_cast<uint8_t>(0x0c + i * 0x04);
         uint8_t code = static_cast<uint8_t>((dpi.values[i] / 50) - 1);
@@ -641,13 +641,13 @@ std::vector<Packet> build_compx_dpi_packets(const DpiSettings& dpi) {
     return result;
 }
 
-int compx_active_dpi_stage_count(const std::array<bool, 5>& enabled) {
-    for (int i = 1; i < 5; ++i)
+int compx_active_dpi_stage_count(const std::array<bool, DPI_SLOTS>& enabled) {
+    for (int i = 1; i < DPI_SLOTS; ++i)
         if (!enabled[i]) return i;
-    return 5;
+    return DPI_SLOTS;
 }
 
-std::vector<Packet> build_compx_color_packets(const uint32_t colors[5], int n_slots) {
+std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], int n_slots) {
     std::vector<Packet> result;
 
     for (int i = 0; i < n_slots; ++i) {
