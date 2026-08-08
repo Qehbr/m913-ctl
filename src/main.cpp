@@ -378,6 +378,30 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ---- validate --button arguments up front ----
+    // Done before the device is opened, because --dpi and --led are applied
+    // ahead of buttons: a binding rejected mid-run would leave those already
+    // written and skip the commit packet, i.e. a half-applied config.
+    for (auto& [name, action_str] : btn_args) {
+        Button btn;
+        if (!parse_button_name(name, btn)) {
+            std::cerr << "Error: unknown button name '" << name << "'\n";
+            return 1;
+        }
+        ActionBytes ab;
+        if (!parse_action(action_str, ab)) {
+            std::cerr << "Error: unknown action '" << action_str << "'\n";
+            return 1;
+        }
+        size_t tokens = action_combo_tokens(ab);
+        if (tokens > MAX_COMBO_TOKENS) {
+            std::cerr << "Error: action '" << action_str << "' for " << name
+                      << " combines " << tokens << " modifiers+keys — the mouse "
+                      << "stores at most " << MAX_COMBO_TOKENS << " per binding\n";
+            return 1;
+        }
+    }
+
     // ---- validate that there's something to do ----
     bool has_work = do_probe || do_probe_commands || do_listen ||
                     !raw_send_hex.empty() ||

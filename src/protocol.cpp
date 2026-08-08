@@ -385,6 +385,23 @@ std::vector<Packet> build_button_mapping(
                         evts.push_back(0x41); evts.push_back(keys[i]); evts.push_back(0x00);
                     }
 
+                    // Guard the fixed capacity of the two sub-packets below
+                    // (see COMBO_* in protocol.h).  Callers are expected to have
+                    // rejected oversized bindings already — validate_config() and
+                    // the --button parser both check action_combo_tokens() before
+                    // anything is sent — so reaching this is a programming error
+                    // rather than bad user input.  It stays as defence in depth:
+                    // build_button_mapping() is public, and going over used to
+                    // write past the end of p2 (a std::array<uint8_t,17>).
+                    if (evts.size() > COMBO_MAX_EVENT_BYTES) {
+                        clear_multikey_actions();
+                        throw std::runtime_error(
+                            "key combination uses " +
+                            std::to_string(evts.size() / COMBO_BYTES_PER_TOKEN) +
+                            " modifiers+keys — the hardware packet format allows at "
+                            "most " + std::to_string(MAX_COMBO_TOKENS));
+                    }
+
                     uint8_t count = static_cast<uint8_t>(evts.size() / 3);
 
                     // Inner checksum covers COUNT + all event bytes

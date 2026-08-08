@@ -171,8 +171,14 @@ See [examples/example.ini](examples/example.ini) for a complete example.
 All standard keys: `a`–`z`, `0`–`9`, `f1`–`f24`, `enter`, `space`, `tab`, `backspace`, `esc`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, arrow keys, numpad keys, etc.
 
 ### Key combinations
+
+A binding may combine **at most 3 modifiers and keys in total**. The mouse
+stores each binding as a fixed-size list of HID events, and three is what
+fits — so `ctrl+shift+z` and `a+b+c` are fine, but `ctrl+shift+alt+f4` (four)
+is rejected with an error.
+
 - Modifier + key: `ctrl+c`, `shift+f4`, `alt+f4`, `ctrl+shift+z`
-- Multi-key (max 3): `a+b`, `a+b+c`
+- Multi-key: `a+b`, `a+b+c`
 - Modifiers: `ctrl`, `shift`, `alt`, `super` (or `ctrl_l`, `ctrl_r`, `shift_l`, etc.)
 
 ## LED settings
