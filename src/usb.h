@@ -62,7 +62,7 @@ public:
     void recv(uint8_t data[M913_PACKET_SIZE]);
 
     // Send a packet and read back the response (combined operation)
-    void send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE]);
+    bool send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE], uint timeout_ms = 500);
 
     // Like recv(), but returns false on timeout instead of throwing.
     // Returns the number of bytes actually received (0 on timeout).

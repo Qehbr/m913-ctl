@@ -85,7 +85,7 @@ Examples:
   m913-ctl --led rainbow
   m913-ctl --dpi 1=800 --dpi 2=1600 --dpi 3=3200 --dpi 4=6400 --dpi 5=7200
   m913-ctl --button side1=f1 --button side2=f2
-  m913-ctl --button fire="fire:50:2"     # fire button: speed=50, repeat=2 times  
+  m913-ctl --button fire="fire:50:2"     # fire button: speed=50, repeat=2 times
   m913-ctl --button side3=media_play --button side4=media_vol_up
   m913-ctl --button side5="ctrl+c" --button side6="a+b"  # key combinations
 
@@ -238,6 +238,40 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
 }
 
 // -----------------------------------------------------------------------
+// get() - get data from mouse
+// -----------------------------------------------------------------------
+// WORK IN PROGRESS - finished func will not have this block
+//
+// Author: DavidBevi
+// > I never touched C++ before, but I know JS, Bash, a bit of C.
+// > Code was LLM generated, but I understand it sufficiently.
+//
+// [x] Send 1 of 69 codes to get the corresponding piece of config from mouse
+// [x] Print raw response to debug
+// [ ] Decode received data
+// [ ] Pretty print
+// [ ] Return usable values
+// -----------------------------------------------------------------------
+
+static void get(UsbMouse& mouse, int index = 68) {
+    // SEND CODE
+    Packet message = M913_READ_CODES[index];
+    uint8_t response[M913_PACKET_SIZE] = {};
+
+    // PRINT INDEX
+    std::cout << std::dec << std::setw(2) << std::setfill(' ') << index << ": ";
+    if (!mouse.send_recv(message.data(), response)) {
+        std::cout << "\n";
+        return;
+    }
+
+    // PRINT RESPONSE
+    for (auto b : response)
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+    std::cout << "\n";
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 
@@ -249,18 +283,19 @@ int main(int argc, char* argv[]) {
 
     // ---- option definitions ----
     struct option long_opts[] = {
-        {"help",         no_argument,       nullptr, 'h'},
-        {"version",      no_argument,       nullptr, 'V'},
+        {"help",            no_argument,       nullptr, 'h'},
+        {"version",         no_argument,       nullptr, 'V'},
         {"listen",          optional_argument, nullptr, 1006},
         {"probe",           no_argument,       nullptr, 1007},
         {"probe-commands",  no_argument,       nullptr, 1008},
         {"raw-send",        required_argument, nullptr, 1009},
-        {"config",       required_argument, nullptr, 'c'},
-        {"dpi",          required_argument, nullptr, 1001},
-        {"led",          required_argument, nullptr, 1002},
-        {"button",       required_argument, nullptr, 1003},
-        {"list-actions",  no_argument,       nullptr, 1004},
-        {"polling-rate",  required_argument, nullptr, 1011},
+        {"config",          required_argument, nullptr, 'c'},
+        {"dpi",             required_argument, nullptr, 1001},
+        {"led",             required_argument, nullptr, 1002},
+        {"button",          required_argument, nullptr, 1003},
+        {"list-actions",    no_argument,       nullptr, 1004},
+        {"polling-rate",    required_argument, nullptr, 1011},
+        {"get",             optional_argument, nullptr, 1012},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -268,6 +303,7 @@ int main(int argc, char* argv[]) {
     bool        do_probe          = false;
     bool        do_listen         = false;
     bool        do_probe_commands = false;
+    bool        do_get            = false;
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
     std::string raw_send_hex;
@@ -394,6 +430,10 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             break;
+
+        case 1012:  // --get [WIP]
+            do_get = true;
+            break;
         }
 
         default:
@@ -427,7 +467,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- validate that there's something to do ----
-    bool has_work = do_probe || do_probe_commands || do_listen ||
+    bool has_work = do_probe || do_probe_commands || do_listen || do_get ||
                     !raw_send_hex.empty() ||
                     !config_file.empty() ||
                     !dpi_args.empty() || !led_arg.empty() || !btn_args.empty() ||
@@ -760,6 +800,19 @@ int main(int argc, char* argv[]) {
             commit[1] = 0x04;
             commit[16] = compute_checksum(commit);  // = 0x49
             send_sequence(mouse, {commit, commit}, "Commit");
+        }
+
+        // ---- --get ----
+        // Get config from mouse, using codes in data.cpp > M913_READ_CODES[]
+        // - if a number is provided it will send that code
+        // - else every code will be sent
+        if (do_get) {
+            if (optind < argc && argv[optind][0] != '-')
+                get(mouse, std::stoi(argv[optind]));
+            else
+                for (uint i = 0; i < 69; ++i)
+                    get(mouse, i);
+            return 0;
         }
 
     } catch (const std::exception& e) {

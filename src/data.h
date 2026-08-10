@@ -41,3 +41,7 @@ size_t action_combo_tokens(const ActionBytes& action);
 
 // Print all recognized action names to stdout (for --list-actions)
 void list_actions();
+
+// Read codes (for --get)
+using ReadPacket = std::array<uint8_t, 17>;
+extern const std::array<ReadPacket, 69> M913_READ_CODES;
