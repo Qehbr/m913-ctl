@@ -143,9 +143,9 @@ void UsbMouse::recv(uint8_t data[M913_PACKET_SIZE]) {
     }
 }
 
-bool UsbMouse::send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE], uint timeout_ms) {
+void UsbMouse::send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE]) {
     send(tx);
-    return try_recv(rx, M913_PACKET_SIZE, 0x82, timeout_ms) > 0;
+    recv(rx);
 }
 
 int UsbMouse::try_recv(uint8_t* buf, int buf_size, uint8_t endpoint,

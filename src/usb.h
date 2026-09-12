@@ -61,8 +61,14 @@ public:
     // Throws std::runtime_error on failure
     void recv(uint8_t data[M913_PACKET_SIZE]);
 
-    // Send a packet and read back the response (combined operation)
-    bool send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE], uint timeout_ms = 500);
+    // Send a packet and read back the response (combined operation).
+    //
+    // Note this takes the FIRST packet to arrive on EP 0x82, which is only
+    // correct when nothing else is talking on that endpoint. Callers that read
+    // config back while the mouse is in use must match the reply to the
+    // request themselves — see get_block() in main.cpp — because HID input
+    // reports share this endpoint.
+    void send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE]);
 
     // Like recv(), but returns false on timeout instead of throwing.
     // Returns the number of bytes actually received (0 on timeout).
