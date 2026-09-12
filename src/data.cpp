@@ -30,11 +30,11 @@ static const std::map<std::string, ActionBytes> mouse_actions = {
     // New actions from M913 captures
     {"three_click",    {0x04, 0x32, 0x03, 0x1c}},
     {"polling_switch", {0x07, 0x00, 0x00, 0x4e}},
-    // Multimedia actions - these use keyboard sub-packet mechanism 
+    // Multimedia actions - these use keyboard sub-packet mechanism
     // 0x92 marker indicates multimedia key that needs special sub-packet handling
     {"media_play",     {0x92, 0x00, 0xcd, 0x00}},
     {"media_player",   {0x92, 0x01, 0x83, 0x01}},  // Launch media player app
-    {"media_next",     {0x92, 0x00, 0xb5, 0x00}}, 
+    {"media_next",     {0x92, 0x00, 0xb5, 0x00}},
     {"media_prev",     {0x92, 0x00, 0xb6, 0x00}},
     {"media_stop",     {0x92, 0x00, 0xb7, 0x00}},
     {"media_vol_up",   {0x92, 0x00, 0xe9, 0x00}},
@@ -200,7 +200,7 @@ bool parse_action(const std::string& action_raw, ActionBytes& out) {
     // Format: [mod+]*key  e.g. "ctrl_l+shift_l+z" or "a+b+c" (multi-key)
     auto parts = split(action, '+');
     if (parts.empty()) return false;
-    
+
     uint8_t mods = 0x00;
     std::vector<uint8_t> keys;
 

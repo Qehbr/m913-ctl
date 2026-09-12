@@ -72,6 +72,15 @@ Options:
   --probe-commands         Probe which command bytes the device responds to
                            (reverse-engineering aid)
 
+  --get [N]                Read configuration blocks back from the mouse and
+                           print the raw replies. N = one block (0-68);
+                           omit N to walk all of them.
+                           Keep the mouse moving while it runs: replies come
+                           from the mouse, not the receiver, and a still
+                           wireless mouse answers late.
+                           Incomplete: replies are printed raw, not decoded.
+                           Codes are Areson-derived.
+
   --raw-send HEX           Send a raw packet and stay in listen mode.
                            HEX = space-separated bytes (up to 16).
                            Bytes are zero-padded to 16; checksum is
@@ -85,7 +94,7 @@ Examples:
   m913-ctl --led rainbow
   m913-ctl --dpi 1=800 --dpi 2=1600 --dpi 3=3200 --dpi 4=6400 --dpi 5=7200
   m913-ctl --button side1=f1 --button side2=f2
-  m913-ctl --button fire="fire:50:2"     # fire button: speed=50, repeat=2 times  
+  m913-ctl --button fire="fire:50:2"     # fire button: speed=50, repeat=2 times
   m913-ctl --button side3=media_play --button side4=media_vol_up
   m913-ctl --button side5="ctrl+c" --button side6="a+b"  # key combinations
 
@@ -238,6 +247,72 @@ static void apply_config(UsbMouse& mouse, const Config& cfg,
 }
 
 // -----------------------------------------------------------------------
+// Read one configuration block back from the mouse (--get)
+// -----------------------------------------------------------------------
+// Incomplete by design, for now: the reply is printed raw. The payload format
+// is understood (see M913_READ_CODES in protocol.h — it is the same layout the
+// write templates use, at the same addresses), so what remains is mechanical:
+//   [ ] decode the replies into DpiSettings / button actions / LED state
+//   [ ] emit an INI file that --config would accept back
+//
+// The index is the caller's responsibility to bound; it is validated during
+// option parsing, before the device is opened.
+// -----------------------------------------------------------------------
+
+static void get_block(UsbMouse& mouse, size_t index) {
+    const Packet& req = M913_READ_CODES[index];
+
+    std::cout << "  [" << std::setw(2) << std::setfill(' ') << index << "] --> ";
+    hexdump_packet(req);
+
+    mouse.send(req.data());
+
+    // Poll until the *matching* reply arrives, discarding anything else.
+    //
+    // EP 0x82 carries more than config replies. When the mouse is in use it
+    // also delivers HID input reports (report ID 0x01) on this endpoint, and a
+    // wired mouse in active use delivers a lot of them. Taking the first
+    // packet that turns up therefore does double damage: the real reply is
+    // lost, and the next request picks it up instead — which is how a sweep
+    // ends up printing a payload under an address nobody asked for.
+    //
+    // A config reply is report ID 0x09 with the request's own address echoed
+    // back in bytes [3..4]. 15 x 100 ms matches send_cmd()'s ACK budget: the
+    // replies come from the mouse rather than the receiver, so an idle
+    // wireless mouse needs the full 1.5 s.
+    uint8_t buf[M913_PACKET_SIZE] = {};
+    int  got     = 0;
+    int  skipped = 0;
+    bool matched = false;
+    for (int attempt = 0; attempt < 15 && !matched; ++attempt) {
+        got = mouse.try_recv(buf, M913_PACKET_SIZE, INTERRUPT_EP_IN, 100);
+        if (got <= 0) continue;
+        if (buf[0] == 0x09 && buf[3] == req[3] && buf[4] == req[4])
+            matched = true;
+        else
+            ++skipped;
+    }
+
+    std::cout << "       <-- ";
+    if (!matched) {
+        std::cout << "(no matching reply";
+        if (skipped)
+            std::cout << "; discarded " << skipped << " unrelated packet(s)";
+        std::cout << " — if wireless, move the mouse)\n";
+        return;
+    }
+    std::cout << std::hex << std::setfill('0');
+    for (int b = 0; b < got; ++b)
+        std::cout << std::setw(2) << static_cast<int>(buf[b]) << " ";
+    std::cout << std::dec << std::setfill(' ');
+    if (got != M913_PACKET_SIZE)
+        std::cout << " (short reply: " << got << " of " << M913_PACKET_SIZE << " bytes)";
+    if (skipped)
+        std::cout << " (skipped " << skipped << " input report(s))";
+    std::cout << "\n";
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 
@@ -249,18 +324,19 @@ int main(int argc, char* argv[]) {
 
     // ---- option definitions ----
     struct option long_opts[] = {
-        {"help",         no_argument,       nullptr, 'h'},
-        {"version",      no_argument,       nullptr, 'V'},
+        {"help",            no_argument,       nullptr, 'h'},
+        {"version",         no_argument,       nullptr, 'V'},
         {"listen",          optional_argument, nullptr, 1006},
         {"probe",           no_argument,       nullptr, 1007},
         {"probe-commands",  no_argument,       nullptr, 1008},
         {"raw-send",        required_argument, nullptr, 1009},
-        {"config",       required_argument, nullptr, 'c'},
-        {"dpi",          required_argument, nullptr, 1001},
-        {"led",          required_argument, nullptr, 1002},
-        {"button",       required_argument, nullptr, 1003},
-        {"list-actions",  no_argument,       nullptr, 1004},
-        {"polling-rate",  required_argument, nullptr, 1011},
+        {"config",          required_argument, nullptr, 'c'},
+        {"dpi",             required_argument, nullptr, 1001},
+        {"led",             required_argument, nullptr, 1002},
+        {"button",          required_argument, nullptr, 1003},
+        {"list-actions",    no_argument,       nullptr, 1004},
+        {"polling-rate",    required_argument, nullptr, 1011},
+        {"get",             optional_argument, nullptr, 1012},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -268,6 +344,8 @@ int main(int argc, char* argv[]) {
     bool        do_probe          = false;
     bool        do_listen         = false;
     bool        do_probe_commands = false;
+    bool        do_get            = false;
+    int         get_index    = -1;  // -1 = every block
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
     std::string raw_send_hex;
@@ -396,6 +474,40 @@ int main(int argc, char* argv[]) {
             break;
         }
 
+        case 1012: {  // --get [N]
+            do_get = true;
+            // Same two-form handling as --listen: getopt only fills optarg for
+            // an optional argument when it is attached as --get=5, but the help
+            // text shows the separated form, so take the next argv too when it
+            // does not look like another option.
+            const char* idx = optarg;
+            if (!idx && optind < argc && argv[optind][0] != '-')
+                idx = argv[optind++];
+            if (idx) {
+                try {
+                    size_t consumed = 0;
+                    int    n        = std::stoi(idx, &consumed);
+                    if (consumed != std::string(idx).size())
+                        throw std::invalid_argument("trailing characters");
+                    // Bounded here, before the device is opened: get_block()
+                    // indexes M913_READ_CODES directly, so an out-of-range
+                    // value would read past the table and transmit whatever
+                    // followed it as a config packet.
+                    if (n < 0 || static_cast<size_t>(n) >= M913_READ_CODE_COUNT) {
+                        std::cerr << "Error: --get index must be 0-"
+                                  << M913_READ_CODE_COUNT - 1 << " (got " << n << ")\n";
+                        return 1;
+                    }
+                    get_index = n;
+                } catch (...) {
+                    std::cerr << "Error: invalid --get index '" << idx
+                              << "' (expect 0-" << M913_READ_CODE_COUNT - 1 << ")\n";
+                    return 1;
+                }
+            }
+            break;
+        }
+
         default:
             std::cerr << "Use --help for usage.\n";
             return 1;
@@ -427,7 +539,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- validate that there's something to do ----
-    bool has_work = do_probe || do_probe_commands || do_listen ||
+    bool has_work = do_probe || do_probe_commands || do_listen || do_get ||
                     !raw_send_hex.empty() ||
                     !config_file.empty() ||
                     !dpi_args.empty() || !led_arg.empty() || !btn_args.empty() ||
@@ -547,6 +659,28 @@ int main(int argc, char* argv[]) {
                 }
             }
             std::cout << "\nDone.\n";
+        }
+
+        // ---- --get [N] ----
+        // Grouped with the other read-only diagnostics, and ahead of --listen
+        // and --raw-send: both of those block until Ctrl+C, so anything after
+        // them never runs.
+        if (do_get) {
+            if (is_compx)
+                std::cerr << "Warning: --get codes were captured from Areson "
+                             "hardware; this device is Compx, which uses "
+                             "different addressing. Replies may be meaningless.\n";
+
+            if (get_index >= 0) {
+                std::cout << "=== Reading config block " << get_index << " ===\n";
+                get_block(mouse, static_cast<size_t>(get_index));
+            } else {
+                std::cout << "=== Reading all " << M913_READ_CODE_COUNT
+                          << " config blocks ===\n";
+                for (size_t i = 0; i < M913_READ_CODES.size(); ++i)
+                    get_block(mouse, i);
+            }
+            std::cout << "\nDone. (replies are raw — decoding is not implemented yet)\n";
         }
 
         // ---- --raw-send HEX ----

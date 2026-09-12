@@ -206,6 +206,49 @@ int compx_active_dpi_stage_count(const std::array<bool, DPI_SLOTS>& enabled);
 std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], int n_slots);
 
 // -----------------------------------------------------------------------
+// Configuration read-back (--get)
+//
+// A replay of one vendor-software session captured from Areson hardware.
+// Sixty-five of the entries are reads: byte[1] = 0x08, bytes[3..4] a
+// big-endian memory address, byte[5] = 0x0a (a 10-byte chunk). Those
+// addresses line up with the write side, which is the best evidence they
+// are right: 0x0160 is the button-mapping base used by the mapping
+// templates, and 0x0100..0x02e0 in steps of 0x22 are the 16 keyboard
+// sub-packet slots of kb_key_addr, read as 2 × 10 bytes each.
+//
+// Verified on real hardware over both transports (25a7:fa07 wireless and
+// 25a7:fa08 wired): all 69 entries answer, and 68 of the 69 replies are
+// byte-identical between the two. The exception is [68], whose bytes [6..7]
+// differ by transport (04 00 wireless, 05 01 wired) and so may encode the
+// current link type — one sample each, not established.
+//
+// The remaining four are NOT reads. They are kept because the capture sent
+// them, but they are not prerequisites — a single read issued on its own
+// returns the same payload as that index does mid-sweep:
+//   [0]  08 03  status; replies 09 03 ... 01
+//   [1]  08 01  challenge/response — 34 2e 4c 57 out, different bytes back
+//   [3]  08 02  echoes its own payload
+//   [68] 08 04  the same commit packet a write session ends with
+//
+// Replies echo the request header and carry 10 payload bytes in [6..15], in
+// exactly the format the write templates use, so decoding is a direct mapping
+// onto the same addresses. Confirmed against a known config: 0x0000 polling
+// rate, 0x0002 active stage count, 0x000c..0x001f the five DPI slots,
+// 0x0054..0x005c LED, 0x0060..0x0098 button mapping, 0x0100..0x02ef the
+// keyboard event lists. The device→host checksum is the documented
+// (0x4C - sum(bytes[1..15])) & 0xFF. Decoding is not implemented yet — --get
+// prints the replies raw.
+//
+// Replies come from the MOUSE, not the receiver, so a wireless mouse lying
+// still answers late or not at all; see the timeout note on send_recv().
+//
+// Areson-derived: Compx uses a different report type and different
+// addressing, so these codes are not known to be valid there.
+// -----------------------------------------------------------------------
+static constexpr size_t M913_READ_CODE_COUNT = 69;
+extern const std::array<Packet, M913_READ_CODE_COUNT> M913_READ_CODES;
+
+// -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
 

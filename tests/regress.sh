@@ -170,6 +170,17 @@ chk "color=#ff0000 survives (not a comment)" "dpi1=400" "$("$TMP/cfg" "$TMP/b.in
 hdr "CLI surface"
 chk "--profile is gone"          "unrecognized option" "$($CTL --profile 2 2>&1)"
 chk "--probe-commands in --help" "--probe-commands"    "$($CTL --help 2>&1)"
+chk "--get in --help"            "--get"               "$($CTL --help 2>&1)"
+
+# --get indexes M913_READ_CODES directly, so an unbounded index would read past
+# the table and transmit whatever followed it. The bound is checked during
+# option parsing, which is also what keeps these checks device-free.
+chk "--get rejects an out-of-range index"     "must be 0-68"  "$($CTL --get 69 2>&1)"
+chk "--get rejects a non-numeric index"       "invalid --get" "$($CTL --get abc 2>&1)"
+chk "--get rejects a trailing-garbage index"  "invalid --get" "$($CTL --get 5x 2>&1)"
+chk "--get=N (attached) is bounded too"       "must be 0-68"  "$($CTL --get=999 2>&1)"
+chk "a bad --get index never opens the device" "0" \
+    "$($CTL --get 999 2>&1 | grep -c Connected)"
 
 # ---------------------------------------------------------------- hardware
 USBDEV=""
