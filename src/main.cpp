@@ -559,11 +559,24 @@ int main(int argc, char* argv[]) {
     bool           is_compx   = false;
     try {
         uint16_t vid = M913_VID, pid = M913_PID;
+        // Wired PIDs come FIRST, deliberately.
+        //
+        // The wired PID is the mouse itself; the wireless PID is only the
+        // receiver. Plugging the cable in makes the mouse switch to wired and
+        // stop listening on 2.4G, but it does NOT make the dongle disappear —
+        // so with both connected, probing the receiver first opens a device
+        // that enumerates fine and then answers nothing, because the packets
+        // are being radioed at a mouse that is no longer on the radio.
+        //
+        // Preferring the direct connection is strictly more reliable: reaching
+        // the mouse over its own USB cable never depends on a live radio link,
+        // and when no cable is present these entries simply fail to open and
+        // the receiver is used as before.
         const std::vector<std::pair<uint16_t,uint16_t>> candidates = {
-            {M913_VID,  M913_PID},
             {M913_VID,  M913_PID_WIRED},
-            {COMPX_VID, COMPX_PID},
+            {M913_VID,  M913_PID},
             {COMPX_VID, COMPX_PID_WIRED},
+            {COMPX_VID, COMPX_PID},
         };
         bool opened = false;
         for (auto [v, p] : candidates) {
