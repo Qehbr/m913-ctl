@@ -36,12 +36,6 @@ enum class LedMode : uint8_t {
     Rainbow    = 0x03,  // Rainbow cycle effect
 };
 
-// M913 has two hardware profiles (switched by hardware button on bottom)
-enum class Profile : uint8_t {
-    P1 = 0x00,
-    P2 = 0x01,
-};
-
 // Button indices matching mouse_m908's _c_button_names for the M913.
 // These are the indices used in the 8-packet button-mapping sequence.
 //
