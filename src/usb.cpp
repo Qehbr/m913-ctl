@@ -21,27 +21,6 @@ UsbMouse::~UsbMouse() {
     }
 }
 
-void UsbMouse::open(uint16_t vid, uint16_t pid) {
-    _handle = libusb_open_device_with_vid_pid(_ctx, vid, pid);
-    if (!_handle) {
-        throw std::runtime_error(
-            "Could not find or open device " +
-            [&]() {
-                std::ostringstream ss;
-                ss << std::hex << std::setw(4) << std::setfill('0') << vid
-                   << ":" << std::setw(4) << std::setfill('0') << pid;
-                return ss.str();
-            }() +
-            " — is the mouse plugged in? Try running with sudo or install the udev rule.");
-    }
-
-    // The mouse exposes two interfaces that need to be claimed:
-    //   Interface 0: mouse (movement, clicks)
-    //   Interface 1: keyboard/extra buttons (config channel lives here)
-    _claim_interface(0, _detached_iface0);
-    _claim_interface(1, _detached_iface1);
-}
-
 void UsbMouse::close() {
     if (!_handle) return;
 
@@ -119,33 +98,6 @@ void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
             << M913_PACKET_SIZE << " bytes";
         throw std::runtime_error(oss.str());
     }
-}
-
-void UsbMouse::recv(uint8_t data[M913_PACKET_SIZE]) {
-    int transferred = 0;
-    int r = libusb_interrupt_transfer(
-        _handle,
-        INTERRUPT_EP_IN,
-        data,
-        M913_PACKET_SIZE,
-        &transferred,
-        USB_TIMEOUT_MS);
-
-    if (r < 0) {
-        throw std::runtime_error(
-            std::string("Interrupt transfer (recv) failed: ") +
-            libusb_strerror(static_cast<libusb_error>(r)));
-    }
-    if (transferred != M913_PACKET_SIZE) {
-        throw std::runtime_error(
-            "Incomplete receive: got " + std::to_string(transferred) +
-            " bytes, expected " + std::to_string(M913_PACKET_SIZE));
-    }
-}
-
-void UsbMouse::send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE]) {
-    send(tx);
-    recv(rx);
 }
 
 int UsbMouse::try_recv(uint8_t* buf, int buf_size, uint8_t endpoint,

@@ -1,6 +1,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <getopt.h>
 #include <iomanip>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include "config.h"
 #include "data.h"
 #include "protocol.h"
+#include "readback.h"
 #include "usb.h"
 
 static volatile sig_atomic_t g_stop = 0;
@@ -59,9 +61,18 @@ Options:
   --probe                  Show USB interfaces and endpoints for the device
 
   -c, --config FILE        Apply settings from an INI config file
+  --save [FILE]            Read the current configuration off the mouse and
+                           write it as an INI file (stdout if FILE is omitted).
+                           The output is what --config accepts back, so this
+                           is the way to get an editable copy of a setup you
+                           made with the vendor software. Areson only; keep
+                           the mouse moving while it runs.
 
   --dpi SLOT=VALUE         Set a DPI slot (1-5), e.g. --dpi 2=3200
   --led MODE               Set LED mode: off, rainbow, steady, respiration
+  --led-color RRGGBB       LED colour for steady/respiration, e.g. ff0000
+  --led-brightness N       LED brightness 0-255 (steady/respiration/rainbow)
+  --led-speed N            Respiration/rainbow speed 1-5 (1=slowest)
   --polling-rate HZ        Set USB polling rate: 125, 250, 500, or 1000 (Hz)
   --button NAME=ACTION     Remap a button, e.g. --button side1=f1
                            NAME: side1..12, left, right, middle, fire
@@ -72,14 +83,11 @@ Options:
   --probe-commands         Probe which command bytes the device responds to
                            (reverse-engineering aid)
 
-  --get [N]                Read configuration blocks back from the mouse and
-                           print the raw replies. N = one block (0-68);
-                           omit N to walk all of them.
-                           Keep the mouse moving while it runs: replies come
-                           from the mouse, not the receiver, and a still
-                           wireless mouse answers late.
-                           Incomplete: replies are printed raw, not decoded.
-                           Codes are Areson-derived.
+  --get [N]                Raw form of --save, for protocol work: print the
+                           replies as hex instead of decoding them. N = one
+                           block (0-68); omit N to walk all of them,
+                           including the 16 regions at 0x0301+ that --save
+                           skips. Codes are Areson-derived.
 
   --raw-send HEX           Send a raw packet and stay in listen mode.
                            HEX = space-separated bytes (up to 16).
@@ -91,12 +99,19 @@ Examples:
   m913-ctl --probe
   m913-ctl --listen
   m913-ctl --config examples/example.ini
+  m913-ctl --save my-setup.ini        # read the mouse's current config
   m913-ctl --led rainbow
+  m913-ctl --led steady --led-color ff0000 --led-brightness 200
   m913-ctl --dpi 1=800 --dpi 2=1600 --dpi 3=3200 --dpi 4=6400 --dpi 5=7200
   m913-ctl --button side1=f1 --button side2=f2
   m913-ctl --button fire="fire:50:2"     # fire button: speed=50, repeat=2 times
   m913-ctl --button side3=media_play --button side4=media_vol_up
   m913-ctl --button side5="ctrl+c" --button side6="a+b"  # key combinations
+
+Note: --button and --dpi write a COMPLETE block each. Any button or DPI slot
+you do not mention is reset to its factory default — the mouse has no way to
+change one entry in isolation. Pass everything you want in a single command,
+or keep it in a config file; --save writes one out for you to edit.
 
 Note: Run as root or install the udev rule for non-root access:
   sudo cp udev/99-m913.rules /usr/lib/udev/rules.d/
@@ -150,110 +165,112 @@ static void send_sequence(UsbMouse& mouse,
 
 // -----------------------------------------------------------------------
 // Apply a full config to the mouse
+//
+// What to send is decided by build_config_sequences() in config.cpp, which
+// touches no hardware — this is only the I/O half.
 // -----------------------------------------------------------------------
 static void apply_config(UsbMouse& mouse, const Config& cfg,
                          const uint8_t* btn_layout = nullptr,
                          bool is_compx = false) {
-
-    // ---- Buttons ----
-    std::map<uint8_t, ActionBytes> btn_changes;
-    for (auto& [key, action_str] : cfg.buttons) {
-        Button btn;
-        if (!parse_button_name(key, btn)) {
-            std::cerr << "  Warning: unknown button '" << key << "', skipping\n";
-            continue;
-        }
-        ActionBytes ab;
-        if (!parse_action(action_str, ab)) {
-            std::cerr << "  Warning: unknown action '" << action_str
-                      << "' for " << key << ", skipping\n";
-            continue;
-        }
-        btn_changes[static_cast<uint8_t>(btn)] = ab;
-        // Register multi-key actions for complex parsing
-        if (ab[0] == 0x90 && ab[3] > 1) {
-            register_multikey_action(static_cast<uint8_t>(btn), action_str);
-        }
-    }
-    if (!btn_changes.empty())
-        send_sequence(mouse, build_button_mapping(btn_changes, btn_layout), "Button mapping");
-
-    // ---- DPI ----
-    // A dpiN_enable flag is worth sending on its own for Compx: that path
-    // emits one packet per set DPI value plus a standalone stage-count
-    // packet, so a stage change travels without touching any value. Areson
-    // packs values and stage count into a single template-based sequence, so
-    // sending it with no values would overwrite every slot with the
-    // template's defaults — there the flags can only ride along with a value.
-    //
-    // This also keeps the LED block below honest: the stage count it derives
-    // from enabled[] is only true of the device once those flags have been
-    // sent. With Compx now always sending them, the two cannot disagree.
-    bool any_dpi_value = false, any_dpi_disabled = false;
-    for (int i = 0; i < DPI_SLOTS; ++i) {
-        if (cfg.dpi[i].value != 0) any_dpi_value    = true;
-        if (!cfg.dpi[i].enabled)   any_dpi_disabled = true;
-    }
-    bool send_dpi = any_dpi_value || (is_compx && any_dpi_disabled);
-
-    if (send_dpi) {
-        DpiSettings dpi;
-        for (int i = 0; i < DPI_SLOTS; ++i) {
-            dpi.values[i]  = cfg.dpi[i].value;
-            dpi.enabled[i] = cfg.dpi[i].enabled;
-        }
-        if (is_compx)
-            send_sequence(mouse, build_compx_dpi_packets(dpi), "DPI config");
-        else
-            send_sequence(mouse, build_dpi_packets(dpi), "DPI config");
-    }
-
-    // ---- LED ----
-    if (is_compx) {
-        // Compx has per-slot RGB colors, no global LED modes.
-        //   [led] section    → applies one color to every active slot
-        //                       (mode=off → black)
-        //   dpiN_color keys  → override individual slots, take precedence
-        bool any_color = cfg.led.set;
-        for (int i = 0; i < DPI_SLOTS; ++i)
-            if (cfg.dpi[i].color != 0xFFFFFFFF) any_color = true;
-
-        if (any_color) {
-            std::array<bool, DPI_SLOTS> enabled_bits;
-            for (int i = 0; i < DPI_SLOTS; ++i)
-                enabled_bits[i] = cfg.dpi[i].enabled;
-            int n_slots = compx_active_dpi_stage_count(enabled_bits);
-
-            uint32_t colors[DPI_SLOTS];
-            uint32_t global = cfg.led.set
-                ? ((cfg.led.mode == LedMode::Off) ? 0x000000 : cfg.led.color)
-                : 0xFFFFFFFF;
-            for (int i = 0; i < DPI_SLOTS; ++i)
-                colors[i] = (cfg.dpi[i].color != 0xFFFFFFFF) ? cfg.dpi[i].color : global;
-
-            send_sequence(mouse, build_compx_color_packets(colors, n_slots), "LED color");
-        }
-    } else if (cfg.led.set) {
-        send_sequence(mouse,
-                      build_led_packets(cfg.led.mode, cfg.led.color, cfg.led.brightness, cfg.led.speed),
-                      "LED mode");
-    }
-
-    // ---- Polling rate ----
-    if (cfg.mouse.set)
-        send_sequence(mouse,
-                      {build_polling_rate_packet(cfg.mouse.polling_rate)},
-                      "Polling rate");
+    for (auto& seq : build_config_sequences(cfg, btn_layout, is_compx))
+        send_sequence(mouse, seq.packets, seq.label);
 }
 
 // -----------------------------------------------------------------------
-// Read one configuration block back from the mouse (--get)
+// Send one read request and wait for the reply that belongs to it.
+//
+// EP 0x82 carries HID input reports as well as config replies, and a wired
+// mouse in active use delivers a lot of them. Taking the first packet that
+// turns up therefore does double damage: the real reply is lost, and the next
+// request picks it up instead — which is how a sweep ends up printing a
+// payload under an address nobody asked for. So match on report ID 0x09 plus
+// the request's own address echoed back in bytes [3..4].
+//
+// 15 × 100 ms is the same budget send_cmd() gives an ACK: replies come from
+// the mouse rather than the receiver, so an idle wireless mouse needs the
+// full 1.5 s.
+//
+// Returns the number of bytes received, 0 if no matching reply arrived.
+// `skipped` is set to how many unrelated packets were discarded.
 // -----------------------------------------------------------------------
-// Incomplete by design, for now: the reply is printed raw. The payload format
-// is understood (see M913_READ_CODES in protocol.h — it is the same layout the
-// write templates use, at the same addresses), so what remains is mechanical:
-//   [ ] decode the replies into DpiSettings / button actions / LED state
-//   [ ] emit an INI file that --config would accept back
+static int fetch_block(UsbMouse& mouse, const Packet& req,
+                       uint8_t rx[M913_PACKET_SIZE], int& skipped) {
+    skipped = 0;
+    mouse.send(req.data());
+
+    for (int attempt = 0; attempt < 15; ++attempt) {
+        int got = mouse.try_recv(rx, M913_PACKET_SIZE, INTERRUPT_EP_IN, 100);
+        if (got <= 0) continue;
+        if (rx[0] == 0x09 && rx[3] == req[3] && rx[4] == req[4]) return got;
+        ++skipped;
+    }
+    return 0;
+}
+
+// -----------------------------------------------------------------------
+// Read every block a decode needs, assembling the device's memory image.
+//
+// Each block gets a second attempt if the first brings back nothing, which
+// is what an idle wireless mouse does. Progress goes through std::cout, which
+// the caller has pointed at stderr when the INI is bound for stdout.
+//
+// Returns the number of blocks that answered.
+// -----------------------------------------------------------------------
+static size_t read_config_image(UsbMouse& mouse, BlockMap& out,
+                               DecodeReport& report) {
+    std::vector<const Packet*> reads = config_read_requests();
+
+    std::cout << "Reading " << reads.size() << " blocks"
+              << " (keep the mouse moving — the replies come from the mouse"
+                 " itself, not the receiver)\n";
+
+    size_t answered = 0, bad_checksum = 0;
+    std::vector<const Packet*> todo = reads;
+
+    for (int pass = 0; pass < 2 && !todo.empty(); ++pass) {
+        if (pass == 1)
+            std::cout << "Retrying " << todo.size()
+                      << " block(s) that did not answer\n";
+
+        std::vector<const Packet*> failed;
+        for (const Packet* req : todo) {
+            if (g_stop) break;
+            uint8_t rx[M913_PACKET_SIZE] = {};
+            int     skipped = 0;
+            if (fetch_block(mouse, *req, rx, skipped) < M913_PACKET_SIZE) {
+                failed.push_back(req);
+                continue;
+            }
+            if (!verify_reply_checksum(rx)) {
+                ++bad_checksum;
+                std::ostringstream w;
+                w << "reply for 0x" << std::hex << std::setw(4) << std::setfill('0')
+                  << request_address(*req) << " failed its checksum";
+                report.warnings.push_back(w.str());
+            }
+            std::array<uint8_t, READ_CHUNK> chunk{};
+            for (size_t i = 0; i < READ_CHUNK; ++i) chunk[i] = rx[6 + i];
+            out[request_address(*req)] = chunk;
+            ++answered;
+        }
+        todo = failed;
+    }
+
+    for (const Packet* req : todo)
+        report.missing.push_back(request_address(*req));
+
+    std::cout << "Read " << answered << " of " << reads.size() << " blocks";
+    if (bad_checksum) std::cout << " (" << bad_checksum << " with a bad checksum)";
+    std::cout << "\n";
+    return answered;
+}
+
+// -----------------------------------------------------------------------
+// Print one configuration block as raw hex (--get)
+//
+// The decoding lives in readback.cpp and is reached through --save; this is
+// the unfiltered view, kept for protocol work: it shows the reply exactly as
+// it arrived, including for the addresses --save has nothing to say about.
 //
 // The index is the caller's responsibility to bound; it is validated during
 // option parsing, before the device is opened.
@@ -265,33 +282,10 @@ static void get_block(UsbMouse& mouse, size_t index) {
     std::cout << "  [" << std::setw(2) << std::setfill(' ') << index << "] --> ";
     hexdump_packet(req);
 
-    mouse.send(req.data());
-
-    // Poll until the *matching* reply arrives, discarding anything else.
-    //
-    // EP 0x82 carries more than config replies. When the mouse is in use it
-    // also delivers HID input reports (report ID 0x01) on this endpoint, and a
-    // wired mouse in active use delivers a lot of them. Taking the first
-    // packet that turns up therefore does double damage: the real reply is
-    // lost, and the next request picks it up instead — which is how a sweep
-    // ends up printing a payload under an address nobody asked for.
-    //
-    // A config reply is report ID 0x09 with the request's own address echoed
-    // back in bytes [3..4]. 15 x 100 ms matches send_cmd()'s ACK budget: the
-    // replies come from the mouse rather than the receiver, so an idle
-    // wireless mouse needs the full 1.5 s.
     uint8_t buf[M913_PACKET_SIZE] = {};
-    int  got     = 0;
-    int  skipped = 0;
-    bool matched = false;
-    for (int attempt = 0; attempt < 15 && !matched; ++attempt) {
-        got = mouse.try_recv(buf, M913_PACKET_SIZE, INTERRUPT_EP_IN, 100);
-        if (got <= 0) continue;
-        if (buf[0] == 0x09 && buf[3] == req[3] && buf[4] == req[4])
-            matched = true;
-        else
-            ++skipped;
-    }
+    int     skipped = 0;
+    int     got     = fetch_block(mouse, req, buf, skipped);
+    bool    matched = got > 0;
 
     std::cout << "       <-- ";
     if (!matched) {
@@ -307,9 +301,66 @@ static void get_block(UsbMouse& mouse, size_t index) {
     std::cout << std::dec << std::setfill(' ');
     if (got != M913_PACKET_SIZE)
         std::cout << " (short reply: " << got << " of " << M913_PACKET_SIZE << " bytes)";
+    if (got == M913_PACKET_SIZE && !verify_reply_checksum(buf))
+        std::cout << " (bad checksum)";
     if (skipped)
         std::cout << " (skipped " << skipped << " input report(s))";
     std::cout << "\n";
+}
+
+// -----------------------------------------------------------------------
+// Read the configuration off the mouse and write it out as INI (--save)
+//
+// `out` is the stream the INI itself goes to; everything else this prints is
+// status and goes through std::cout, which the caller has already pointed at
+// stderr when the INI is bound for stdout.
+//
+// Returns false if nothing usable came back.
+// -----------------------------------------------------------------------
+static bool save_config(UsbMouse& mouse, std::ostream& out,
+                        const std::string& device_id) {
+    BlockMap     image;
+    DecodeReport report;
+    read_config_image(mouse, image, report);
+
+    Config cfg;
+    if (!decode_device_config(image, cfg, report)) {
+        std::cerr << "Error: could not decode a configuration from the mouse";
+        if (image.empty())
+            std::cerr << " — no block answered. If this is the wireless"
+                         " receiver, keep the mouse moving and try again";
+        std::cerr << "\n";
+        return false;
+    }
+
+    std::string header =
+        "Written by m913-ctl " + std::string(VERSION) + " --save, read from " +
+        device_id + "\n"
+        "\n"
+        "Applying this file rewrites ALL 16 buttons and ALL 5 DPI slots: the\n"
+        "mouse stores each as one block, so there is no way to change part of\n"
+        "one. That is fine here — this file describes the whole state.\n";
+
+    if (!report.missing.empty()) {
+        header += "\nINCOMPLETE: " + std::to_string(report.missing.size()) +
+                  " block(s) never answered, so some settings below are\n"
+                  "absent rather than wrong. Re-run with the mouse moving.\n";
+    }
+    if (!report.warnings.empty()) {
+        header += "\nNotes from the decoder:\n";
+        for (auto& w : report.warnings) header += "  - " + w + "\n";
+    }
+
+    out << config_to_ini(cfg, header, report.unnamed_buttons);
+    out.flush();
+
+    for (auto& w : report.warnings)
+        std::cerr << "Warning: " << w << "\n";
+    if (!report.missing.empty()) {
+        std::cerr << "Warning: " << report.missing.size()
+                  << " block(s) did not answer; the output is incomplete.\n";
+    }
+    return true;
 }
 
 // -----------------------------------------------------------------------
@@ -337,6 +388,10 @@ int main(int argc, char* argv[]) {
         {"list-actions",    no_argument,       nullptr, 1004},
         {"polling-rate",    required_argument, nullptr, 1011},
         {"get",             optional_argument, nullptr, 1012},
+        {"save",            optional_argument, nullptr, 1013},
+        {"led-color",       required_argument, nullptr, 1014},
+        {"led-brightness",  required_argument, nullptr, 1015},
+        {"led-speed",       required_argument, nullptr, 1016},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -345,9 +400,11 @@ int main(int argc, char* argv[]) {
     bool        do_listen         = false;
     bool        do_probe_commands = false;
     bool        do_get            = false;
+    bool        do_save           = false;
     int         get_index    = -1;  // -1 = every block
     int         listen_ep    = -1;  // -1 = auto (try 0x81 and 0x82)
     std::string config_file;
+    std::string save_file;         // empty with do_save = write to stdout
     std::string raw_send_hex;
 
     struct DpiArg  { int slot; uint16_t value; };
@@ -355,8 +412,19 @@ int main(int argc, char* argv[]) {
 
     std::vector<DpiArg>   dpi_args;
     std::vector<BtnArg>   btn_args;
-    std::string           led_arg;
     uint16_t              polling_rate_arg = 0;  // 0 = not set
+
+    // Inline LED arguments. Each is only applied when its flag was given, so
+    // --led-color on its own can recolour without disturbing the mode the
+    // config file (or the device) already has.
+    bool     led_mode_set  = false;
+    LedMode  led_mode_arg  = LedMode::Rainbow;
+    bool     led_color_set = false;
+    uint32_t led_color_arg = 0;
+    bool     led_bright_set = false;
+    uint8_t  led_bright_arg = 0;
+    bool     led_speed_set  = false;
+    uint8_t  led_speed_arg  = 0;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "hVc:", long_opts, nullptr)) != -1) {
@@ -402,9 +470,26 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        case 1002:  // --led MODE
-            led_arg = optarg;
+        case 1002: {  // --led MODE
+            // Resolved here rather than after the device is opened, so an
+            // unknown mode fails before anything is claimed or written.
+            std::string sl = optarg;
+            for (auto& c : sl)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if      (sl == "off")         led_mode_arg = LedMode::Off;
+            else if (sl == "rainbow")     led_mode_arg = LedMode::Rainbow;
+            else if (sl == "static")      led_mode_arg = LedMode::Steady;
+            else if (sl == "steady")      led_mode_arg = LedMode::Steady;
+            else if (sl == "breathing")   led_mode_arg = LedMode::Respiration;
+            else if (sl == "respiration") led_mode_arg = LedMode::Respiration;
+            else {
+                std::cerr << "Error: unknown LED mode '" << optarg
+                          << "'. Valid: off, rainbow, steady, respiration\n";
+                return 1;
+            }
+            led_mode_set = true;
             break;
+        }
 
         case 1003: {  // --button NAME=ACTION
             std::string arg = optarg;
@@ -508,6 +593,59 @@ int main(int argc, char* argv[]) {
             break;
         }
 
+        case 1013: {  // --save [FILE]
+            do_save = true;
+            // Same two-form handling as --listen and --get.
+            const char* f = optarg;
+            if (!f && optind < argc && argv[optind][0] != '-')
+                f = argv[optind++];
+            if (f) save_file = f;
+            break;
+        }
+
+        case 1014: {  // --led-color RRGGBB
+            std::string hex = optarg;
+            if (!hex.empty() && hex[0] == '#') hex = hex.substr(1);
+            try {
+                size_t consumed = 0;
+                unsigned long v = std::stoul(hex, &consumed, 16);
+                if (hex.size() != 6 || consumed != 6) throw std::invalid_argument("");
+                led_color_arg = static_cast<uint32_t>(v);
+                led_color_set = true;
+            } catch (...) {
+                std::cerr << "Error: --led-color expects 6 hex digits (e.g. ff0000), got '"
+                          << optarg << "'\n";
+                return 1;
+            }
+            break;
+        }
+
+        case 1015: {  // --led-brightness N
+            try {
+                int v = std::stoi(optarg);
+                if (v < 0 || v > 255) throw std::out_of_range("");
+                led_bright_arg = static_cast<uint8_t>(v);
+                led_bright_set = true;
+            } catch (...) {
+                std::cerr << "Error: --led-brightness must be 0-255\n";
+                return 1;
+            }
+            break;
+        }
+
+        case 1016: {  // --led-speed N
+            try {
+                int v = std::stoi(optarg);
+                if (v < 1 || v > 5) throw std::out_of_range("");
+                led_speed_arg = static_cast<uint8_t>(v);
+                led_speed_set = true;
+            } catch (...) {
+                std::cerr << "Error: --led-speed must be 1-5 (1=slowest)\n";
+                return 1;
+            }
+            break;
+        }
+
         default:
             std::cerr << "Use --help for usage.\n";
             return 1;
@@ -539,15 +677,25 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- validate that there's something to do ----
-    bool has_work = do_probe || do_probe_commands || do_listen || do_get ||
+    bool has_led_arg = led_mode_set || led_color_set || led_bright_set || led_speed_set;
+    bool has_work = do_probe || do_probe_commands || do_listen || do_get || do_save ||
                     !raw_send_hex.empty() ||
                     !config_file.empty() ||
-                    !dpi_args.empty() || !led_arg.empty() || !btn_args.empty() ||
+                    !dpi_args.empty() || has_led_arg || !btn_args.empty() ||
                     polling_rate_arg != 0;
     if (!has_work) {
         print_help(argv[0]);
         return 0;
     }
+
+    // `--save` with no FILE puts the INI on stdout, which has to be the only
+    // thing there — otherwise `m913-ctl --save > my.ini` produces a file that
+    // starts with connection chatter and packet dumps. Rather than thread a
+    // stream parameter through every print below, point std::cout at stderr
+    // for the rest of the run and keep the real stdout for the INI.
+    std::streambuf* real_stdout = std::cout.rdbuf();
+    if (do_save && save_file.empty())
+        std::cout.rdbuf(std::cerr.rdbuf());
 
     // Install before the device is opened, so every path that can claim a USB
     // interface is covered by the cleanup on the way out.
@@ -557,6 +705,8 @@ int main(int argc, char* argv[]) {
     UsbMouse mouse;
     const uint8_t* btn_layout = nullptr;
     bool           is_compx   = false;
+    uint16_t       dev_vid    = 0;
+    uint16_t       dev_pid    = 0;
     try {
         uint16_t vid = M913_VID, pid = M913_PID;
         // Wired PIDs come FIRST, deliberately.
@@ -589,24 +739,12 @@ int main(int argc, char* argv[]) {
         if (!opened)
             throw std::runtime_error("Could not find any supported M913 variant — is the mouse plugged in? Try running with sudo or install the udev rule.");
 
+        dev_vid    = vid;
+        dev_pid    = pid;
         is_compx   = (vid == COMPX_VID);
         btn_layout = is_compx ? COMPX_LAYOUT : nullptr;
         if (is_compx)
             mouse.set_ctrl_value(0x0208);  // Compx uses output report, not feature report
-
-        // Now that the revision is known, check the --dpi values against what
-        // this hardware can actually store. Done before any packet is sent so
-        // an unsupported value cannot leave a partly-applied config behind.
-        for (auto& [slot, val] : dpi_args) {
-            if (!dpi_value_supported(val, is_compx)) {
-                std::cerr << "Error: DPI " << val << " is not supported by this "
-                          << (is_compx ? "(Compx)" : "(Areson)") << " hardware"
-                          << " — nearest supported value is "
-                          << nearest_supported_dpi(val, is_compx) << "\n";
-                mouse.close();
-                return 1;
-            }
-        }
 
         std::cout << "Connected (" << std::hex
                   << std::setw(4) << std::setfill('0') << vid << ":"
@@ -632,6 +770,53 @@ int main(int argc, char* argv[]) {
     int exit_code = 0;
 
     try {
+        // ---- build the configuration to write ----
+        //
+        // The file and the inline flags are merged into ONE Config and applied
+        // once. They used to be applied one after the other, which meant
+        // `--config f.ini --button side1=x` sent two complete button-mapping
+        // sequences and the second — carrying only side1 — reset every button
+        // the file had just set. Overlaying instead makes the inline flags
+        // behave like overrides, which is what the syntax suggests.
+        //
+        // Parsed and validated here, before any diagnostic mode runs, so a
+        // typo in the file or an unsupported DPI value cannot be discovered
+        // after --listen has already blocked for a minute.
+        Config cfg;
+        bool   do_write = false;
+
+        if (!config_file.empty()) {
+            std::cout << "=== Reading config: " << config_file << " ===\n";
+            cfg      = parse_config_file(config_file);
+            do_write = true;
+        }
+
+        for (auto& [slot, val] : dpi_args) {
+            if (slot >= 1 && slot <= DPI_SLOTS) {
+                cfg.dpi[slot - 1].value = val;
+                do_write = true;
+            }
+        }
+
+        if (led_mode_set)  { cfg.led.mode = led_mode_arg;  cfg.led.set = true; do_write = true; }
+        if (led_color_set) { cfg.led.color = led_color_arg; cfg.led.set = true; do_write = true; }
+        if (led_bright_set){ cfg.led.brightness = led_bright_arg; cfg.led.set = true; do_write = true; }
+        if (led_speed_set) { cfg.led.speed = led_speed_arg; cfg.led.set = true; do_write = true; }
+
+        if (polling_rate_arg != 0) {
+            cfg.mouse.polling_rate = polling_rate_arg;
+            cfg.mouse.set          = true;
+            do_write               = true;
+        }
+
+        for (auto& [name, action_str] : btn_args) {
+            cfg.buttons[name] = action_str;
+            do_write          = true;
+        }
+
+        if (do_write)
+            validate_config(cfg, is_compx);
+
         // ---- --probe ----
         if (do_probe) {
             std::cout << "=== USB endpoint probe ===\n";
@@ -693,7 +878,47 @@ int main(int argc, char* argv[]) {
                 for (size_t i = 0; i < M913_READ_CODES.size(); ++i)
                     get_block(mouse, i);
             }
-            std::cout << "\nDone. (replies are raw — decoding is not implemented yet)\n";
+            std::cout << "\nDone. (raw replies — use --save for a decoded config)\n";
+        }
+
+        // ---- --save [FILE] ----
+        // Placed with the other read-only modes and ahead of any write, so a
+        // run that both saves and applies captures the configuration as it
+        // was found rather than the one it is about to install.
+        if (do_save) {
+            if (is_compx) {
+                std::cerr << "Error: --save decodes the Areson layout only. The Compx"
+                             " revision answers a different report type at addresses"
+                             " that have never been captured, so there is nothing"
+                             " reliable to decode. Use --get to see the raw replies.\n";
+                exit_code = 1;
+                goto cleanup;
+            }
+
+            std::ostringstream id;
+            id << std::hex << std::setw(4) << std::setfill('0') << dev_vid << ":"
+               << std::setw(4) << std::setfill('0') << dev_pid;
+
+            if (save_file.empty()) {
+                std::ostream ini(real_stdout);
+                if (!save_config(mouse, ini, id.str())) {
+                    exit_code = 1;
+                    goto cleanup;
+                }
+            } else {
+                std::ofstream f(save_file);
+                if (!f) {
+                    std::cerr << "Error: cannot write " << save_file << "\n";
+                    exit_code = 1;
+                    goto cleanup;
+                }
+                if (!save_config(mouse, f, id.str())) {
+                    exit_code = 1;
+                    goto cleanup;
+                }
+                f.close();
+                std::cout << "Wrote " << save_file << "\n";
+            }
         }
 
         // ---- --raw-send HEX ----
@@ -802,106 +1027,19 @@ int main(int argc, char* argv[]) {
             std::cout << "\nStopped.\n";
         }
 
-        // ---- --config FILE ----
-        bool did_config = false;
-
-        if (!config_file.empty()) {
-            std::cout << "=== Applying config: " << config_file << " ===\n";
-            Config cfg = parse_config_file(config_file);
-            validate_config(cfg, is_compx);
+        // ---- apply the merged configuration ----
+        // One Config, one pass, whether it came from a file, from inline
+        // flags, or from both. Built and validated at the top of this block.
+        if (do_write) {
+            std::cout << "=== Applying configuration ===\n";
             apply_config(mouse, cfg, btn_layout, is_compx);
-            did_config = true;
-        }
-
-        // ---- inline --dpi args ----
-        if (!dpi_args.empty()) {
-            DpiSettings dpi;
-            for (auto& [slot, val] : dpi_args) {
-                if (slot >= 1 && slot <= 5)
-                    dpi.values[slot - 1] = val;
-            }
-            if (is_compx)
-                send_sequence(mouse, build_compx_dpi_packets(dpi), "DPI config");
-            else
-                send_sequence(mouse, build_dpi_packets(dpi), "DPI config");
-            did_config = true;
-        }
-
-        // ---- inline --led arg ----
-        if (!led_arg.empty()) {
-            LedMode mode;
-            std::string sl = led_arg;
-            for (auto& c : sl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if      (sl == "off")       mode = LedMode::Off;
-            else if (sl == "rainbow")   mode = LedMode::Rainbow;
-            else if (sl == "static")    mode = LedMode::Steady;
-            else if (sl == "steady")    mode = LedMode::Steady;
-            else if (sl == "breathing") mode = LedMode::Respiration;
-            else if (sl == "respiration") mode = LedMode::Respiration;
-            else {
-                std::cerr << "Error: unknown LED mode '" << led_arg
-                          << "'. Valid: off, rainbow, steady, respiration\n";
-                exit_code = 1;
-                goto cleanup;
-            }
-            if (is_compx) {
-                // All five stages, deliberately: --led carries no DPI info and
-                // the active stage count cannot be read back, so there is no
-                // enabled[] to derive a smaller number from here. Colouring an
-                // inactive stage is harmless; missing an active one would leave
-                // it lit with its old colour (very visible for --led off).
-                uint32_t slot_color = (mode == LedMode::Off) ? 0x000000 : 0x00ff00;
-                uint32_t colors[DPI_SLOTS] = {slot_color, slot_color, slot_color,
-                                             slot_color, slot_color};
-                send_sequence(mouse, build_compx_color_packets(colors, DPI_SLOTS),
-                              "LED color");
-            } else {
-                send_sequence(mouse, build_led_packets(mode), "LED mode");
-            }
-            did_config = true;
-        }
-
-        // ---- inline --button args ----
-        if (!btn_args.empty()) {
-            std::map<uint8_t, ActionBytes> btn_changes;
-            for (auto& [name, action_str] : btn_args) {
-                Button btn;
-                if (!parse_button_name(name, btn)) {
-                    std::cerr << "Error: unknown button name '" << name << "'\n";
-                    exit_code = 1;
-                    goto cleanup;
-                }
-                ActionBytes ab;
-                if (!parse_action(action_str, ab)) {
-                    std::cerr << "Error: unknown action '" << action_str << "'\n";
-                    exit_code = 1;
-                    goto cleanup;
-                }
-                btn_changes[static_cast<uint8_t>(btn)] = ab;
-                // Register multi-key actions for complex parsing
-                if (ab[0] == 0x90 && ab[3] > 1) {
-                    register_multikey_action(static_cast<uint8_t>(btn), action_str);
-                }
-            }
-            send_sequence(mouse,
-                          build_button_mapping(btn_changes, btn_layout),
-                          "Button mapping");
-            did_config = true;
-        }
-
-        // ---- inline --polling-rate arg ----
-        if (polling_rate_arg != 0) {
-            send_sequence(mouse,
-                          {build_polling_rate_packet(polling_rate_arg)},
-                          "Polling rate");
-            did_config = true;
         }
 
         // ---- commit ----
         // The Redragon software always ends a config session with two
         // "08 04 00..." packets (observed in USB captures).  These appear
         // to act as a commit/apply-to-flash command.
-        if (did_config) {
+        if (do_write) {
             Packet commit{};
             commit[0] = 0x08;
             commit[1] = 0x04;

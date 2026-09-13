@@ -162,6 +162,12 @@ bool dpi_value_supported(uint16_t dpi, bool is_compx);
 // since the supported set has large gaps at the top of the Areson range.
 uint16_t nearest_supported_dpi(uint16_t dpi, bool is_compx);
 
+// The DPI value a stored encoding byte stands for — the inverse of what
+// build_dpi_packets() / build_compx_dpi_packets() write, used to decode a
+// config read back off the mouse. Returns 0 for a byte no encoding produces
+// (an erased slot reads 0xFF, which is one such byte on Areson).
+uint16_t dpi_from_code(uint8_t code, bool is_compx);
+
 // Build the LED configuration packet sequence (1–2 packets).
 // color: 24-bit RGB (0xRRGGBB), brightness: 0–255 (Steady mode only)
 // speed: 1–5 (Respiration mode, 1=slowest, 5=fastest)
@@ -199,10 +205,12 @@ int compx_active_dpi_stage_count(const std::array<bool, DPI_SLOTS>& enabled);
 // colors:    one 0xRRGGBB per slot (DPI_SLOTS entries); 0x000000 = LED off for that slot.
 //            0xFFFFFFFF = skip this slot (no packet sent).
 // n_slots: how many stages to colour (1–DPI_SLOTS). Derive it with
-//          compx_active_dpi_stage_count() when an enabled[] pattern is
-//          available; pass DPI_SLOTS when it is not (see --led in main),
-//          since the active count cannot be read back from the device and
-//          missing an active stage leaves it showing its previous colour.
+//          compx_active_dpi_stage_count() so it cannot disagree with the
+//          stage-count packet. Where no enabled[] pattern was given at all
+//          that yields DPI_SLOTS, which is the safe direction: the active
+//          count cannot be read back from the device, and missing an active
+//          stage leaves it showing its previous colour, while colouring an
+//          inactive one does nothing.
 std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], int n_slots);
 
 // -----------------------------------------------------------------------
@@ -232,15 +240,27 @@ std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], 
 //
 // Replies echo the request header and carry 10 payload bytes in [6..15], in
 // exactly the format the write templates use, so decoding is a direct mapping
-// onto the same addresses. Confirmed against a known config: 0x0000 polling
-// rate, 0x0002 active stage count, 0x000c..0x001f the five DPI slots,
-// 0x0054..0x005c LED, 0x0060..0x0098 button mapping, 0x0100..0x02ef the
-// keyboard event lists. The device→host checksum is the documented
-// (0x4C - sum(bytes[1..15])) & 0xFF. Decoding is not implemented yet — --get
-// prints the replies raw.
+// onto the same addresses: 0x0000 polling rate, 0x0002 active stage count,
+// 0x000c..0x001f the five DPI slots, 0x0054..0x005c LED, 0x0060..0x009f
+// button mapping, 0x0100..0x02ef the keyboard event lists. The device→host
+// checksum is the documented (0x4C - sum(bytes[1..15])) & 0xFF.
+//
+// Decoding lives in readback.cpp and is reached through --save, which turns a
+// read-back into an INI that --config accepts. --get is the raw view, kept
+// for protocol work. The two directions are checked against each other
+// offline: see the config round-trip in tests/regress.sh.
+//
+// The 16 entries at 0x0301 and up are NOT part of that. They address 16
+// regions of 384 bytes (stride 0x180) that read as erased flash, every byte
+// 0xFF, and nothing is known to live there. They are confirmed writable, and
+// the vendor software can store macros somewhere, but neither the storage
+// format nor the button action code that points at a macro has been
+// captured — so this tool has nothing to write there and nothing to decode.
+// --save skips them; --get still shows them, which is how you would check
+// whether something appeared after the vendor software wrote a macro.
 //
 // Replies come from the MOUSE, not the receiver, so a wireless mouse lying
-// still answers late or not at all; see the timeout note on send_recv().
+// still answers late or not at all; see the polling budget in fetch_block().
 //
 // Areson-derived: Compx uses a different report type and different
 // addressing, so these codes are not known to be valid there.

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -153,6 +154,48 @@ static const std::map<std::string, uint8_t> key_codes = {
 };
 
 // -----------------------------------------------------------------------
+// Alias sets — which spellings are NOT canonical
+//
+// Several names above share one encoding. Parsing accepts them all; the
+// reverse direction (action_name(), decode_key_event_list()) must pick
+// exactly one spelling per encoding, or a config read back off the mouse
+// would not necessarily parse back to the bytes it came from.
+//
+// These sets name the losers. Two of the choices are not cosmetic:
+//
+//   * "left"/"right" are mouse-button action names AND arrow keycodes. If
+//     the reverse direction emitted "left" for keycode 0x50, re-applying the
+//     INI would bind a mouse click instead of the arrow key. It must emit
+//     "arrow_left". ("up"/"down" have no such clash but follow suit, so the
+//     four arrows read the same way in a saved file.)
+//   * the one-character punctuation names ("-", "=", "[") are legal in an
+//     INI value but read as noise; the word forms are emitted instead.
+//
+// tests/regress.sh round-trips every name in the tables above through the
+// reverse direction, so a new alias that is not listed here fails the suite
+// rather than silently corrupting a saved config.
+// -----------------------------------------------------------------------
+static const std::set<std::string> action_aliases = {
+    "dpi-loop",   // = dpi-cycle
+    "rgb_toggle", // = led_toggle
+    "disable",    // = none
+    "favorites",  // = www_favorites
+};
+
+static const std::set<std::string> modifier_aliases = {
+    "ctrl_l", "shift_l", "alt_l", "super_l",  // = ctrl, shift, alt, super
+    "meta_l", "meta",                         // = super
+    "meta_r",                                 // = super_r
+};
+
+static const std::set<std::string> key_aliases = {
+    "return", "escape",                              // = enter, esc
+    "left", "right", "up", "down",                   // = arrow_* (see above)
+    // punctuation: the word forms (minus, equal, lbracket, …) are canonical
+    "-", "=", "[", "]", "\\", ";", "'", "`", ",", ".", "/",
+};
+
+// -----------------------------------------------------------------------
 // parse_action
 // -----------------------------------------------------------------------
 
@@ -265,6 +308,147 @@ size_t action_combo_tokens(const ActionBytes& action) {
     else if (action[2] != 0x00)   tokens += 1;          // single key
 
     return tokens;
+}
+
+// -----------------------------------------------------------------------
+// Reverse direction: bytes → names (used by --save)
+// -----------------------------------------------------------------------
+
+// Reverse lookups, built once from the forward tables minus the alias sets,
+// so there is still only one place where a name and its encoding are paired.
+static const std::map<ActionBytes, std::string>& action_by_bytes() {
+    static const std::map<ActionBytes, std::string> m = [] {
+        std::map<ActionBytes, std::string> t;
+        for (auto& [name, ab] : mouse_actions)
+            if (!action_aliases.count(name)) t.emplace(ab, name);
+        return t;
+    }();
+    return m;
+}
+
+static const std::map<uint8_t, std::string>& key_by_code() {
+    static const std::map<uint8_t, std::string> m = [] {
+        std::map<uint8_t, std::string> t;
+        for (auto& [name, code] : key_codes)
+            if (!key_aliases.count(name)) t.emplace(code, name);
+        return t;
+    }();
+    return m;
+}
+
+static const std::map<uint8_t, std::string>& modifier_by_bit() {
+    static const std::map<uint8_t, std::string> m = [] {
+        std::map<uint8_t, std::string> t;
+        for (auto& [name, bit] : modifier_bits)
+            if (!modifier_aliases.count(name)) t.emplace(bit, name);
+        return t;
+    }();
+    return m;
+}
+
+std::string action_name(const ActionBytes& action) {
+    // Exact table match first. This is what keeps "fire" and "three_click"
+    // readable: both are 0x04 actions and three_click's bytes are exactly
+    // what "fire:50:3" encodes to, so the two are indistinguishable on the
+    // wire. Whichever name the table gives re-encodes to the same bytes, so
+    // either spelling round-trips — the table's is just the friendlier one.
+    auto it = action_by_bytes().find(action);
+    if (it != action_by_bytes().end()) return it->second;
+
+    // Rapid fire with non-default parameters: 0x04, speed, times, checksum.
+    if (action[0] == 0x04) {
+        uint8_t speed = action[1];
+        uint8_t times = action[2];
+        uint8_t want  = static_cast<uint8_t>((0x55u - (0x04u + speed + times)) & 0xFF);
+        if (action[3] != want) return "";   // not a fire action after all
+        if (speed < 3) return "";           // parse_action would reject it
+        // 4 on the wire is how parse_action() spells "no clicks"; anything
+        // above 3 is a value the firmware stores and then ignores, so it has
+        // no name to give back.
+        if (times == 4)      return "fire:" + std::to_string(speed) + ":0";
+        if (times >= 1 && times <= 3)
+            return "fire:" + std::to_string(speed) + ":" + std::to_string(times);
+        return "";
+    }
+
+    return "";
+}
+
+std::string decode_key_event_list(const uint8_t* p, size_t n) {
+    if (n < 2) return "";
+
+    size_t count = p[0];
+    // Layout: count, then count × 3 event bytes, then a 1-byte inner
+    // checksum. An erased slot reads 0xFF, which fails this immediately.
+    if (count == 0 || 1 + count * 3 + 1 > n) return "";
+
+    uint16_t sum = static_cast<uint16_t>(count);
+    for (size_t i = 0; i < count * 3; ++i) sum += p[1 + i];
+    uint8_t inner = static_cast<uint8_t>((0x55u - (sum & 0xFF)) & 0xFF);
+    if (p[1 + count * 3] != inner) return "";
+
+    uint8_t              mods = 0;
+    std::vector<uint8_t> keys;
+    std::string          consumer;
+
+    for (size_t i = 0; i < count; ++i) {
+        uint8_t type  = p[1 + i * 3];
+        uint8_t value = p[2 + i * 3];
+        uint8_t extra = p[3 + i * 3];
+        switch (type) {
+        case 0x80: mods |= value;       break;  // modifier down
+        case 0x81: keys.push_back(value); break; // key down
+        case 0x82: {                             // consumer / multimedia down
+            // Stored as {0x92, extra, code, extra} by parse_action, and the
+            // event carries [type][code][extra] — so match on both.
+            for (auto& [name, ab] : mouse_actions) {
+                if (ab[0] == 0x92 && ab[2] == value && ab[1] == extra &&
+                    !action_aliases.count(name)) {
+                    consumer = name;
+                    break;
+                }
+            }
+            if (consumer.empty()) return "";
+            break;
+        }
+        case 0x40: case 0x41: case 0x42:
+            break;                               // the matching up events
+        default:
+            return "";                           // unknown event type
+        }
+    }
+
+    // A consumer binding is a whole action on its own; mixing it with keys is
+    // not something parse_action() can express, so refuse rather than guess.
+    if (!consumer.empty())
+        return (mods == 0 && keys.empty()) ? consumer : "";
+
+    std::vector<std::string> tokens;
+    for (uint8_t bit = 0x01; bit; bit = static_cast<uint8_t>(bit << 1)) {
+        if (!(mods & bit)) continue;
+        auto mit = modifier_by_bit().find(bit);
+        if (mit == modifier_by_bit().end()) return "";
+        tokens.push_back(mit->second);
+        if (bit == 0x80) break;   // avoid wrapping to 0 on the last shift
+    }
+    for (uint8_t k : keys) {
+        auto kit = key_by_code().find(k);
+        if (kit == key_by_code().end()) return "";
+        tokens.push_back(kit->second);
+    }
+    if (tokens.empty()) return "";
+
+    std::string out = tokens[0];
+    for (size_t i = 1; i < tokens.size(); ++i) out += "+" + tokens[i];
+    return out;
+}
+
+std::vector<std::string> all_parseable_action_names() {
+    std::vector<std::string> names;
+    for (auto& [name, _] : mouse_actions)  names.push_back(name);
+    for (auto& [name, _] : key_codes)      names.push_back(name);
+    for (auto& [name, _] : modifier_bits)  names.push_back(name);
+    return names;
 }
 
 bool parse_multikey(const std::string& action, uint8_t& mods, std::vector<uint8_t>& keys) {

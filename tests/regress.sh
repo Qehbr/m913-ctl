@@ -29,6 +29,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 INC="-I $REPO/src $(pkg-config --cflags libusb-1.0 2>/dev/null)"
 SRC="$REPO/src/protocol.cpp $REPO/src/data.cpp"
+# Everything except main.cpp and usb.cpp, i.e. the whole write and read path
+# with no I/O in it. readback.cpp needs libusb's header for UsbMouse but not
+# the library, since the harnesses below never open a device.
+SRC_ALL="$SRC $REPO/src/config.cpp $REPO/src/readback.cpp"
 
 pass=0; fail=0; skip=0
 ok(){   printf "  \033[32mPASS\033[0m  %s\n" "$1"; pass=$((pass+1)); }
@@ -129,6 +133,43 @@ chk "enable-only config still emits the stage packet"       "ENABLEONLY 1" "$OUT
 chk "colour builder honours DPI_SLOTS"                      "COLOR 5"      "$OUT"
 chk "DPI_SLOTS == 5"                                        "SLOTS 5"      "$OUT"
 
+hdr "Compx write path (config → sequences)"
+# build_config_sequences() decides what a Config turns into for both hardware
+# revisions. The Compx half cannot be checked by the round-trip below — there
+# is no read-back for it — so its shape is asserted directly here: which
+# sequences get sent, and how many packets each carries.
+cat > "$TMP/compxseq.cpp" <<'EOF'
+#include "config.h"
+#include <cstdio>
+static void show(const char* tag, const Config& c) {
+    printf("%s:", tag);
+    for (auto& s : build_config_sequences(c, COMPX_LAYOUT, true))
+        printf(" %s=%zu", s.label.c_str(), s.packets.size());
+    printf("\n");
+}
+int main() {
+    Config a;                       // --led off only: colours every stage
+    a.led.set = true; a.led.mode = LedMode::Off;
+    show("LEDONLY", a);
+
+    Config b;                       // dpi2_enable=0 with no values at all
+    b.dpi[1].enabled = false;
+    show("ENABLEONLY", b);
+
+    Config c;                       // values + per-stage colours, 3 stages
+    for (int i = 0; i < DPI_SLOTS; ++i) { c.dpi[i].value = 800; c.dpi[i].color = 0x10203040 & 0xFFFFFF; }
+    c.dpi[3].enabled = false;
+    show("FULL", c);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/compxseq.cpp" $SRC_ALL -o "$TMP/compxseq" 2>/dev/null
+CS="$("$TMP/compxseq")"
+chk "--led off alone colours all 5 stages"        "LEDONLY: LED color=5"          "$CS"
+chk "an enable-only config sends just the stage packet" "ENABLEONLY: DPI config=1" "$CS"
+chk "values+colours: 5 DPI + stage packet, 3 active stages coloured" \
+    "FULL: DPI config=6 LED color=3" "$CS"
+
 hdr "DPI validation is per-revision"
 cat > "$TMP/dpi.cpp" <<'EOF'
 #include "protocol.h"
@@ -197,10 +238,234 @@ chk "times=3 passes through unchanged"            "fire:58:3=043a0314" "$FV"
 chk "times=4 refused (hardware fires nothing)"    "fire:58:4=REJECT"   "$FV"
 chk "times=50 refused (stored but never fires)"   "fire:58:50=REJECT"  "$FV"
 
+hdr "Action name round-trip (every name --save could emit)"
+# --save turns stored bytes back into names, and those names have to parse to
+# the bytes they came from or a saved config silently differs from the mouse.
+# The risk is aliases: several names share one encoding ("none"/"disable",
+# "left" as a mouse button AND as an arrow keycode), so the reverse direction
+# has to pick one spelling per encoding. This walks every name in the tables.
+cat > "$TMP/names.cpp" <<'EOF'
+#include "protocol.h"
+#include "data.h"
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <string>
+
+// Simulated device memory: apply a write packet the way the mouse would.
+static uint8_t mem[0x400];
+static void apply_packet(const Packet& p) {
+    if (p[1] != 0x07) return;
+    unsigned addr = (unsigned)((p[3] << 8) | p[4]), len = p[5];
+    for (unsigned i = 0; i < len && addr + i < sizeof(mem); ++i)
+        mem[addr + i] = p[6 + i];
+}
+
+int main() {
+    int checked = 0, bad = 0;
+    for (const std::string& name : all_parseable_action_names()) {
+        ActionBytes want;
+        if (!parse_action(name, want)) { printf("PARSEFAIL %s\n", name.c_str()); ++bad; continue; }
+
+        std::string spelled;
+        if (want[0] == 0x90 || want[0] == 0x92) {
+            // Keyboard and consumer bindings live in the button's event list,
+            // so go through the packets to get the bytes the mouse stores.
+            memset(mem, 0xFF, sizeof mem);
+            std::map<uint8_t, ActionBytes> m; m[0] = want;
+            if (want[0] == 0x90 && want[3] > 1) register_multikey_action(0, name);
+            for (const Packet& p : build_button_mapping(m, nullptr)) apply_packet(p);
+            spelled = decode_key_event_list(&mem[0x0100], 20);
+        } else {
+            spelled = action_name(want);
+        }
+
+        ++checked;
+        ActionBytes back;
+        if (spelled.empty() || !parse_action(spelled, back) || back != want) {
+            printf("MISMATCH '%s' -> '%s'\n", name.c_str(), spelled.c_str());
+            ++bad;
+        }
+    }
+    printf("NAMES checked=%d bad=%d\n", checked, bad);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/names.cpp" $SRC_ALL -o "$TMP/names" 2>/dev/null
+NM="$("$TMP/names" 2>&1)"
+chk "every action name survives bytes → name → bytes" "bad=0" "$NM"
+# Guard against the harness silently walking an empty table.
+NCHECKED="$(sed -n 's/.*checked=\([0-9]*\).*/\1/p' <<<"$NM")"
+if [[ -n "$NCHECKED" && "$NCHECKED" -gt 100 ]]; then
+  ok "the whole table was walked ($NCHECKED names)"
+else
+  no "suspiciously few names checked — $NM"
+fi
+
+hdr "Config round-trip (write path → device image → read path)"
+# The strongest offline check there is: build the packets a Config would be
+# written as, apply them to a simulated device memory, read that memory back
+# through the same addresses M913_READ_CODES asks for, decode it, and require
+# the result to match what went in. It covers both halves at once — a wrong
+# address or a misread field on either side breaks it — and it is what makes
+# --save trustworthy without a mouse to hand.
+cat > "$TMP/rt.cpp" <<'EOF'
+#include "config.h"
+#include "readback.h"
+#include "data.h"
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <string>
+
+static uint8_t mem[0x400];
+static void apply_packet(const Packet& p) {
+    if (p[1] != 0x07) return;
+    unsigned addr = (unsigned)((p[3] << 8) | p[4]), len = p[5];
+    for (unsigned i = 0; i < len && addr + i < sizeof(mem); ++i)
+        mem[addr + i] = p[6 + i];
+}
+// Read the image back exactly where the real read codes point, so a decoder
+// that wants an address nobody asks for fails here rather than on hardware.
+static BlockMap to_blocks() {
+    BlockMap b;
+    for (const Packet* req : config_read_requests()) {
+        uint16_t addr = request_address(*req);
+        std::array<uint8_t, READ_CHUNK> c{};
+        for (size_t i = 0; i < READ_CHUNK; ++i)
+            c[i] = (addr + i < sizeof(mem)) ? mem[addr + i] : 0xFF;
+        b[addr] = c;
+    }
+    return b;
+}
+
+static int fails = 0;
+static void eq(const char* what, long a, long b) {
+    if (a != b) { printf("BAD %s: %ld != %ld\n", what, a, b); ++fails; }
+}
+// Buttons are compared as BYTES, not spellings: "three_click" and "fire:50:3"
+// are the same four bytes, and the arrow keys come back as arrow_*.
+static void eq_button(const char* tag, const Config& a, const Config& b,
+                      const std::string& key) {
+    ActionBytes wa{}, wb{};
+    auto ia = a.buttons.find(key), ib = b.buttons.find(key);
+    if (ia == a.buttons.end() || ib == b.buttons.end() ||
+        !parse_action(ia->second, wa) || !parse_action(ib->second, wb) || wa != wb) {
+        printf("BAD %s %s: '%s' -> '%s'\n", tag, key.c_str(),
+               ia == a.buttons.end() ? "" : ia->second.c_str(),
+               ib == b.buttons.end() ? "" : ib->second.c_str());
+        ++fails;
+    }
+}
+
+int main(int, char** argv) {
+    const char* ini_path = argv[1];
+
+    // One binding per branch of build_button_mapping(): direct mouse action,
+    // fire with parameters, plain key, modifier+key, multi-key, modifier
+    // only, two consumer keys, DPI controls, a special, and an arrow alias.
+    const char* actions[16] = {
+        "left", "right", "middle", "fire:25:2",
+        "f5", "ctrl+c", "a+b+c", "super",
+        "media_play", "media_vol_up", "dpi+", "dpi-cycle",
+        "led_toggle", "none", "arrow_left", "www_back",
+    };
+
+    Config in;
+    in.mouse.polling_rate = 500; in.mouse.set = true;
+    const uint16_t vals[DPI_SLOTS] = {400, 800, 1600, 3200, 6400};
+    for (int i = 0; i < DPI_SLOTS; ++i) in.dpi[i].value = vals[i];
+    in.dpi[3].enabled = false;            // stages cascade off from here
+    in.led.set = true; in.led.mode = LedMode::Respiration;
+    in.led.color = 0x123456; in.led.brightness = 200; in.led.speed = 4;
+    for (int i = 0; i < 16; ++i)
+        in.buttons[button_ini_name(button_ini_order()[i])] = actions[i];
+
+    memset(mem, 0xFF, sizeof mem);
+    for (auto& seq : build_config_sequences(in, nullptr, false))
+        for (const Packet& p : seq.packets) apply_packet(p);
+
+    Config out; DecodeReport rep;
+    if (!decode_device_config(to_blocks(), out, rep)) { printf("DECODEFAIL\n"); return 0; }
+
+    eq("polling", in.mouse.polling_rate, out.mouse.polling_rate);
+    for (int i = 0; i < DPI_SLOTS; ++i) eq("dpi", in.dpi[i].value, out.dpi[i].value);
+    // The device stores a stage COUNT, not a per-slot mask, so the cascade is
+    // the expected answer here, not the enabled[] that went in.
+    int want_stages = compx_active_dpi_stage_count(
+        {in.dpi[0].enabled, in.dpi[1].enabled, in.dpi[2].enabled,
+         in.dpi[3].enabled, in.dpi[4].enabled});
+    int got_stages = 0;
+    for (int i = 0; i < DPI_SLOTS; ++i) if (out.dpi[i].enabled) ++got_stages;
+    eq("stages", want_stages, got_stages);
+    eq("led mode",  (long)in.led.mode, (long)out.led.mode);
+    eq("led color", in.led.color, out.led.color);
+    eq("led brightness", in.led.brightness, out.led.brightness);
+    eq("led speed", in.led.speed, out.led.speed);
+    for (int i = 0; i < 16; ++i)
+        eq_button("button", in, out, button_ini_name(button_ini_order()[i]));
+
+    // And what --save would write has to parse back to the same thing.
+    { std::ofstream f(ini_path); f << config_to_ini(out, "round-trip test", rep.unnamed_buttons); }
+    Config re = parse_config_file(ini_path);
+    eq("ini polling", out.mouse.polling_rate, re.mouse.polling_rate);
+    eq("ini led mode", (long)out.led.mode, (long)re.led.mode);
+    eq("ini led color", out.led.color, re.led.color);
+    eq("ini led speed", out.led.speed, re.led.speed);
+    for (int i = 0; i < DPI_SLOTS; ++i) eq("ini dpi", out.dpi[i].value, re.dpi[i].value);
+    int re_stages = 0;
+    for (int i = 0; i < DPI_SLOTS; ++i) if (re.dpi[i].enabled) ++re_stages;
+    eq("ini stages", want_stages, re_stages);
+    for (int i = 0; i < 16; ++i)
+        eq_button("ini button", out, re, button_ini_name(button_ini_order()[i]));
+
+    printf("RT fails=%d warnings=%zu missing=%zu unnamed=%zu\n",
+           fails, rep.warnings.size(), rep.missing.size(), rep.unnamed_buttons.size());
+
+    // An erased device (every byte 0xFF) must decode to gaps, not to invented
+    // values, and must still produce an INI that parses.
+    memset(mem, 0xFF, sizeof mem);
+    Config e; DecodeReport erep;
+    decode_device_config(to_blocks(), e, erep);
+    { std::ofstream f(std::string(ini_path) + ".erased");
+      f << config_to_ini(e, "erased", erep.unnamed_buttons); }
+    bool ini_ok = true;
+    try { parse_config_file(std::string(ini_path) + ".erased"); }
+    catch (const std::exception&) { ini_ok = false; }
+    printf("ERASED buttons=%zu named=%zu iniparses=%d\n",
+           erep.unnamed_buttons.size(), e.buttons.size(), (int)ini_ok);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/rt.cpp" $SRC_ALL -o "$TMP/rt" 2>/dev/null
+RT="$("$TMP/rt" "$TMP/rt.ini" 2>&1)"
+chk "config survives write → device → read → INI → parse" "RT fails=0" "$RT"
+chk "nothing decoded with a warning"                      "warnings=0"  "$RT"
+chk "every address the decoder wants is actually read"    "missing=0"   "$RT"
+chk "all 16 buttons were named"                           "unnamed=0"   "$RT"
+chk "an erased device names no buttons"                   "ERASED buttons=16 named=0" "$RT"
+chk "an erased device still writes a parseable INI"       "iniparses=1" "$RT"
+
 hdr "CLI surface"
 chk "--profile is gone"          "unrecognized option" "$($CTL --profile 2 2>&1)"
 chk "--probe-commands in --help" "--probe-commands"    "$($CTL --help 2>&1)"
 chk "--get in --help"            "--get"               "$($CTL --help 2>&1)"
+chk "--save in --help"           "--save"              "$($CTL --help 2>&1)"
+chk "--led-color in --help"      "--led-color"         "$($CTL --help 2>&1)"
+chk "whole-block writes documented in --help" "reset to its factory default" \
+    "$($CTL --help 2>&1)"
+
+# Every one of these is rejected during option parsing, before the device is
+# opened — the same reason the --get bound is checked there. A value that only
+# fails later could leave DPI or LED already written and the commit skipped.
+chk "--led rejects an unknown mode"      "unknown LED mode"    "$($CTL --led purple 2>&1)"
+chk "--led-color rejects non-hex"        "6 hex digits"        "$($CTL --led-color zzzzzz 2>&1)"
+chk "--led-color rejects short input"    "6 hex digits"        "$($CTL --led-color f00 2>&1)"
+chk "--led-brightness rejects 256"       "must be 0-255"       "$($CTL --led-brightness 256 2>&1)"
+chk "--led-speed rejects 0"              "must be 1-5"         "$($CTL --led-speed 0 2>&1)"
+for f in "--led purple" "--led-color zz" "--led-speed 9" "--led-brightness 999"; do
+  chk "bad $f never opens the device" "0" "$($CTL $f 2>&1 | grep -c Connected)"
+done
 
 # --get indexes M913_READ_CODES directly, so an unbounded index would read past
 # the table and transmit whatever followed it. The bound is checked during
@@ -245,6 +510,54 @@ else
   $CTL --probe >/dev/null 2>&1; sleep 1
   chk "the next run reattaches interface 0" "usbhid" "$(drv 0)"
   chk "the next run reattaches interface 1" "usbhid" "$(drv 1)"
+
+  hdr "Configuration read-back (--save, needs the device)"
+  # The offline round-trip proves the decoder agrees with the packet builders.
+  # What it cannot prove is that the ADDRESSES are right: those came from one
+  # captured vendor session, so the only real check is to write a known config
+  # and read it back off the mouse.
+  VID="$(cat "/sys/bus/usb/devices/${USBDEV}/idVendor" 2>/dev/null || echo '')"
+  if [[ "$VID" == "3554" ]]; then
+    chk "--save refuses Compx rather than guessing" "Areson layout only" \
+        "$($CTL --save 2>&1)"
+  else
+    printf '[mouse]\npolling_rate=500\n[dpi]\ndpi1=800\ndpi2=1600\ndpi3=3200\n' \
+           > "$TMP/known.ini"
+    printf '[led]\nmode=steady\ncolor=ff0000\nbrightness=200\n'              >> "$TMP/known.ini"
+    printf '[buttons]\nbutton_side1=f5\nbutton_side2=ctrl+c\nbutton_side3=a+b+c\n' \
+           >> "$TMP/known.ini"
+    printf 'button_side4=media_play\nbutton_fire=fire:25:2\n'                >> "$TMP/known.ini"
+    $CTL --config "$TMP/known.ini" >/dev/null 2>&1
+    sleep 2
+
+    # INI on stdout, progress on stderr — that split is what makes this work.
+    SAVED="$($CTL --save 2>/dev/null)"
+    if [[ -z "$SAVED" || "$SAVED" == *INCOMPLETE* ]]; then
+      # Same reason the ACK count is reported rather than asserted: the replies
+      # come from the mouse, and an idle 2.4G mouse answers late or not at all.
+      printf "  \033[33mINFO\033[0m  %s\n" \
+        "--save came back empty or incomplete — normal for an idle wireless mouse, move it and re-run"
+    else
+      chk "polling rate read back"      "polling_rate=500"     "$SAVED"
+      chk "dpi1 read back"              "dpi1=800"             "$SAVED"
+      chk "dpi3 read back"              "dpi3=3200"            "$SAVED"
+      chk "LED mode read back"          "mode=steady"          "$SAVED"
+      chk "LED colour read back"        "color=ff0000"         "$SAVED"
+      chk "LED brightness read back"    "brightness=200"       "$SAVED"
+      chk "plain key read back"         "button_side1=f5"      "$SAVED"
+      chk "combo read back"             "button_side2=ctrl+c"  "$SAVED"
+      chk "multi-key read back"         "button_side3=a+b+c"   "$SAVED"
+      chk "multimedia read back"        "button_side4=media_play" "$SAVED"
+      chk "fire parameters read back"   "button_fire=fire:25:2"   "$SAVED"
+      chk "no undecodable bindings"     "0" "$(grep -c '^; button' <<<"$SAVED")"
+      printf '%s' "$SAVED" > "$TMP/saved.ini"
+      if $CTL --config "$TMP/saved.ini" >/dev/null 2>&1; then
+        ok "--save output re-applies with --config"
+      else
+        no "--save output was rejected by --config"
+      fi
+    fi
+  fi
 
   hdr "End-to-end"
   # The wireless link needs a moment after the claim/kill churn above,

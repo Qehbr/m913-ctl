@@ -40,10 +40,9 @@ public:
     UsbMouse(const UsbMouse&) = delete;
     UsbMouse& operator=(const UsbMouse&) = delete;
 
-    // Open the mouse by VID/PID (detaches kernel driver automatically)
-    void open(uint16_t vid = M913_VID, uint16_t pid = M913_PID);
-
-    // Open and claim all interfaces found on the device (for debug/investigation)
+    // Open the device and claim every interface it exposes, detaching the
+    // kernel driver from each. Interface count comes from the descriptor:
+    // the Compx revision has three, the Areson two.
     void open_all_interfaces(uint16_t vid, uint16_t pid);
 
     // Override the HID report type used in SET_REPORT control transfers.
@@ -57,22 +56,16 @@ public:
     // Throws std::runtime_error on failure
     void send(const uint8_t data[M913_PACKET_SIZE]);
 
-    // Receive a 17-byte response from the mouse via interrupt transfer
-    // Throws std::runtime_error on failure
-    void recv(uint8_t data[M913_PACKET_SIZE]);
-
-    // Send a packet and read back the response (combined operation).
+    // Read whatever arrives on an interrupt endpoint, returning 0 on timeout
+    // rather than throwing — a timeout is the normal case here, since the
+    // mouse only answers when it has something to say.
     //
-    // Note this takes the FIRST packet to arrive on EP 0x82, which is only
-    // correct when nothing else is talking on that endpoint. Callers that read
-    // config back while the mouse is in use must match the reply to the
-    // request themselves — see get_block() in main.cpp — because HID input
-    // reports share this endpoint.
-    void send_recv(const uint8_t tx[M913_PACKET_SIZE], uint8_t rx[M913_PACKET_SIZE]);
-
-    // Like recv(), but returns false on timeout instead of throwing.
-    // Returns the number of bytes actually received (0 on timeout).
-    // buf must be at least buf_size bytes. Used by --listen mode.
+    // This takes the NEXT packet on the endpoint, which is not necessarily a
+    // reply to anything: EP 0x82 also carries HID input reports while the
+    // mouse is in use. Callers that need the answer to a specific request
+    // must match it themselves — see fetch_block() in readback.cpp.
+    //
+    // Returns the number of bytes received. buf must hold buf_size bytes.
     int try_recv(uint8_t* buf, int buf_size, uint8_t endpoint = INTERRUPT_EP_IN,
                  unsigned int timeout_ms = 500);
 

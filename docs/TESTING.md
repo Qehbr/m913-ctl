@@ -7,8 +7,9 @@ usually accepted and simply does the wrong thing. The two scripts in
 
 | | What it covers | Needs a mouse? |
 |---|---|---|
-| [`tests/regress.sh`](../tests/regress.sh) | Packet building, validation, config parsing, CLI surface, signal handling | Partly — device sections skip themselves |
+| [`tests/regress.sh`](../tests/regress.sh) | Packet building, read-back decoding, validation, config parsing, CLI surface, signal handling | Partly — device sections skip themselves |
 | [`tests/verify-hardware.py`](../tests/verify-hardware.py) | What the mouse actually transmits after being configured | Yes, and a human to press buttons |
+| [`tools/decode-capture.py`](../tools/decode-capture.py) | Not a test — decodes a USB capture or a `--get` dump, and diffs two of them | No |
 
 ## Building
 
@@ -43,11 +44,40 @@ small harnesses against the real sources and checks behaviour directly:
   A shared "multiple of 100" rule was wrong in both directions.
 - **INI parsing**, including that an inline `;` comment is stripped while
   `color=#ff0000` survives.
+- **Action name round-trip.** `--save` turns stored bytes back into names, so
+  every name in the tables is pushed through bytes → name → bytes and must come
+  back identical. The hazard is aliases: several names share one encoding
+  (`none`/`disable`), and `left` is both a mouse button and an arrow keycode —
+  emitting `left` for keycode `0x50` would silently turn an arrow binding into a
+  click. 174 names, and a new unlisted alias fails the suite.
+- **Config round-trip**, the strongest offline check here: build the packets a
+  config would be written as, apply them to a simulated device memory, read that
+  memory back through the addresses `M913_READ_CODES` actually asks for, decode
+  it, and require what comes out to equal what went in — then write it as an INI
+  and parse that too. It covers the write path and the read path at once; a
+  wrong address on either side breaks it. This is what makes `--save`
+  trustworthy without a mouse to hand. It also checks that an erased
+  (all-`0xFF`) device decodes to reported gaps rather than invented values.
+- **CLI surface**, including that every `--led*` value is rejected during option
+  parsing, before the device is opened.
 
 The hardware half detects the mouse in sysfs (so no bus path is hardcoded) and
-covers signal handling, driver reattachment, and a full config apply. It
-**rewrites the mouse's stored configuration** and re-applies `$RESTORE_INI`
-afterwards — point that at your own config if you keep one elsewhere.
+covers signal handling, driver reattachment, a full config apply, and
+configuration read-back. It **rewrites the mouse's stored configuration** and
+re-applies `$RESTORE_INI` afterwards — point that at your own config if you keep
+one elsewhere.
+
+The read-back check is the one that cannot be done offline. The round-trip above
+proves the decoder and the packet builders agree with each other; it cannot prove
+the **addresses** are right, since those came from a single captured vendor
+session. So the suite writes a config covering every binding shape, reads it back
+with `--save`, and requires the values to come back — then feeds the result to
+`--config` to confirm it re-applies. On Compx it instead checks that `--save`
+refuses, rather than decoding addresses nobody has captured.
+
+Like the ACK count, an empty or incomplete read-back is reported as INFO rather
+than failed: the replies come from the mouse, and an idle wireless mouse answers
+late. Move the mouse and re-run.
 
 ## Interactive hardware verification
 
@@ -136,7 +166,15 @@ throws: a missing ACK means the outcome is unknown, whereas a truncated
 
 **Each invocation writes a complete button map.** Buttons not mentioned are
 reset to their defaults, so any test that touches one button rewrites all
-sixteen. Both scripts restore a config at the end for this reason.
+sixteen. The same is true of the five DPI slots. Both scripts restore a config
+at the end for this reason — and `m913-ctl --save before.ini` is worth running
+first if the mouse holds a setup you care about.
+
+**The offline harnesses compile against the real sources**, and everything
+except `main.cpp` and `usb.cpp` links without libusb. That is deliberate:
+`build_config_sequences()` (config → packets) and `decode_device_config()`
+(bytes → config) are pure functions, with the USB transfers kept in `main.cpp`.
+Moving logic into `main.cpp` puts it beyond the reach of the suite.
 
 ## Non-root access
 

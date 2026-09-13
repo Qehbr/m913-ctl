@@ -491,6 +491,18 @@ uint16_t nearest_supported_dpi(uint16_t dpi, bool is_compx) {
     return best;
 }
 
+uint16_t dpi_from_code(uint8_t code, bool is_compx) {
+    if (is_compx) {
+        // Encoder is (value / 50) - 1, so 0xFF would mean 12800 — above the
+        // range the encoder accepts, and also what an erased byte reads as.
+        uint16_t v = static_cast<uint16_t>((code + 1) * COMPX_DPI_STEP);
+        return (v >= COMPX_DPI_MIN && v <= COMPX_DPI_MAX) ? v : 0;
+    }
+    for (auto& e : dpi_table)
+        if (e.b[0] == code) return e.dpi;
+    return 0;
+}
+
 std::vector<Packet> build_dpi_packets(const DpiSettings& dpi) {
     // Copy the 4-packet template.
     Packet buf[4];
