@@ -167,6 +167,36 @@ g++ -std=c++17 $INC "$TMP/cfg.cpp" "$REPO/src/config.cpp" $SRC -o "$TMP/cfg" 2>/
 chk "inline ';' comment stripped"        "dpi2en=0" "$("$TMP/cfg" "$TMP/a.ini")"
 chk "color=#ff0000 survives (not a comment)" "dpi1=400" "$("$TMP/cfg" "$TMP/b.ini")"
 
+hdr "Fire button encoding"
+# Measured click counts on 25a7:fa07 for the value written to the mouse:
+#   0 -> 1 click, 1 -> 1, 2 -> 2, 3 -> 3, 4 and above -> NOTHING fires.
+# So "no clicks" can only be spelled 4, and 3 is a real ceiling rather than a
+# cautious guess. Both facts are easy to "tidy away" later, hence these checks.
+cat > "$TMP/fire.cpp" <<'EOF'
+#include "data.h"
+#include <cstdio>
+int main() {
+    const char* in[] = {"fire", "fire:58:0", "fire:58:1", "fire:58:2",
+                        "fire:58:3", "fire:58:4", "fire:58:50"};
+    for (auto s : in) {
+        ActionBytes ab;
+        if (!parse_action(s, ab)) { printf("%s=REJECT ", s); continue; }
+        printf("%s=%02x%02x%02x%02x ", s, ab[0], ab[1], ab[2], ab[3]);
+    }
+    printf("\n");
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/fire.cpp" $SRC -o "$TMP/fire" 2>/dev/null
+FV="$("$TMP/fire")"
+chk "bare 'fire' is speed 58 / 3 clicks"          "fire=043a0314"      "$FV"
+chk "times=0 is written as 4 (only value that fires nothing)" "fire:58:0=043a0413" "$FV"
+chk "times=1 passes through unchanged"            "fire:58:1=043a0116" "$FV"
+chk "times=2 passes through unchanged"            "fire:58:2=043a0215" "$FV"
+chk "times=3 passes through unchanged"            "fire:58:3=043a0314" "$FV"
+chk "times=4 refused (hardware fires nothing)"    "fire:58:4=REJECT"   "$FV"
+chk "times=50 refused (stored but never fires)"   "fire:58:50=REJECT"  "$FV"
+
 hdr "CLI surface"
 chk "--profile is gone"          "unrecognized option" "$($CTL --profile 2 2>&1)"
 chk "--probe-commands in --help" "--probe-commands"    "$($CTL --help 2>&1)"
