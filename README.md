@@ -169,8 +169,28 @@ See [examples/example.ini](examples/example.ini) for a complete example.
 `led_toggle` `three_click` `polling_switch` `none`
 
 ### Fire button
-- `fire` — default fire (hardware auto-repeat)
-- `fire:speed:times` — custom speed (3–255, lower=faster) and repeat count (0–3)
+
+Rapid fire / burst click — one press of the fire button sends a short burst of
+left clicks.
+
+- `fire` — default burst (speed 58, 3 clicks)
+- `fire:speed:times` — `speed` 3–255 (lower = faster), `times` = clicks per press, **0–3**
+
+> **This is not an autoclicker.** `times` is a fixed number of clicks per press,
+> not a repeat-while-held mode, and **3 is a hardware ceiling**, not a
+> conservative choice. Measured on `25a7:fa07`:
+>
+> | value written to the mouse | 0 | 1 | 2 | 3 | 4 or more |
+> |---|---|---|---|---|---|
+> | clicks actually fired | 1 | 1 | 2 | 3 | **0** |
+>
+> The firmware has no encoding for "no clicks" below 4, and treats 0 as 1. So
+> `m913-ctl` writes 4 when you ask for `times=0`, which is the value that really
+> fires nothing — `times` therefore means exactly what it says across 0–3.
+>
+> Do not raise the limit in `parse_action()` without re-testing on hardware: the
+> mouse stores any value you give it and then silently refuses to honour it,
+> so a raised cap looks like it worked and produces a dead button.
 
 > **Note:** The minimum usable speed depends on your OS debounce threshold. Very low values (e.g. `speed=3`) may cause all clicks to register as one. Start around `speed=25` and tune down until clicks stop being detected.
 

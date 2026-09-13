@@ -24,7 +24,11 @@ static const std::map<std::string, ActionBytes> mouse_actions = {
     {"rgb_toggle",     {0x08, 0x00, 0x00, 0x4d}},  // alias
     {"none",           {0x00, 0x00, 0x00, 0x55}},
     {"disable",        {0x00, 0x00, 0x00, 0x55}},  // alias
-    // "fire" = rapid-fire (hardware auto-repeat).
+    // "fire" = rapid fire: one press sends a burst of N left clicks. NOT a
+    // repeat-while-held autoclicker, and N maxes out at 3 in firmware --
+    // measured on 25a7:fa07, times=4+ is stored verbatim but fires nothing at
+    // all, so the times<=3 check in parse_action() is load-bearing. That same
+    // measurement is what lets times=0 mean "no clicks"; see parse_action().
     // Confirmed from USB capture: bytes are 04 3a 03 14 (not 04 14 03 3a as in mouse_m908 source).
     {"fire",           {0x04, 0x3a, 0x03, 0x14}},
     // New actions from M913 captures
@@ -179,9 +183,23 @@ bool parse_action(const std::string& action_raw, ActionBytes& out) {
             try {
                 int speed = std::stoi(parts[1]);
                 int times = std::stoi(parts[2]);
+                // times<=3 is a measured hardware ceiling, not caution: the
+                // mouse stores 4+ but then fires nothing. See the note on the
+                // "fire" entry above before touching this bound.
                 if (speed >= 3 && speed <= 255 && times >= 0 && times <= 3) {
-                    uint8_t checksum = (0x55u - (0x04u + speed + times)) & 0xFF;
-                    out = {0x04, static_cast<uint8_t>(speed), static_cast<uint8_t>(times), checksum};
+                    // Measured click counts on 25a7:fa07:
+                    //   times on wire | 0 | 1 | 2 | 3 | 4+
+                    //   clicks fired  | 1 | 1 | 2 | 3 | 0
+                    //
+                    // So the firmware has no encoding for "no clicks" below 4,
+                    // and 0 is an alias for 1. Asking for times=0 and getting
+                    // one click is the opposite of what the config says, so
+                    // spell 0 as 4 on the wire -- that is the value that really
+                    // fires nothing. 1..3 are literal and go through unchanged.
+                    int wire_times = (times == 0) ? 4 : times;
+                    uint8_t checksum = (0x55u - (0x04u + speed + wire_times)) & 0xFF;
+                    out = {0x04, static_cast<uint8_t>(speed),
+                           static_cast<uint8_t>(wire_times), checksum};
                     return true;
                 }
             } catch (...) {}
