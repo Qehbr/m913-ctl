@@ -57,6 +57,21 @@ bool decode_device_config(const BlockMap& blocks, Config& out, DecodeReport& rep
 // (0x4C - sum(bytes[1..15])) & 0xFF, with byte[0] (report ID 0x09) excluded.
 bool verify_reply_checksum(const uint8_t pkt[M913_PACKET_SIZE]);
 
+// True if `reply` is the device's answer to `request`.
+//
+// EP 0x82 carries HID input reports and the answers to *earlier* requests as
+// well as this one's, so a caller that takes whatever turns up next will
+// sooner or later credit one packet's acknowledgement to another. That is not
+// hypothetical: it is how a dropped write was observed being reported as
+// successful, with the bytes never reaching the device.
+//
+// The device echoes a request's header back with report ID 0x09 in place of
+// 0x08, so sub-command and address identify the answer. The payload is NOT
+// compared: a write's acknowledgement echoes it, but a commit's carries status
+// bytes instead, so an equality test on the whole packet would reject the
+// commit acknowledgements every config session ends with.
+bool ack_matches(const Packet& request, const uint8_t reply[M913_PACKET_SIZE]);
+
 // The read requests a decode needs, in order: the read entries of
 // M913_READ_CODES (sub-command 0x08, 10-byte chunk) below `addr_limit`.
 //

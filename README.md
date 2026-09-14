@@ -130,10 +130,13 @@ m913-ctl --list-actions
 > — so `--config my.ini --dpi 1=1600` keeps everything in the file and changes
 > only DPI slot 1.
 
-> **`(no ACK within 1.5s)`?** The acknowledgement comes from the mouse itself over
-> the wireless link, and an idle mouse throttles its radio, so replies often
-> arrive too late. The settings still apply. Keep the mouse moving while the
-> command runs and the ACKs come back.
+> **`(NOT acknowledged ...)`?** That packet did not land. The acknowledgement
+> comes from the mouse itself over the wireless link, not from the receiver, and
+> an idle mouse stops answering within seconds. Each packet is re-sent up to six
+> times, and anything still unanswered is counted and reported at the end, with
+> a non-zero exit status — so a partial write cannot pass for a complete one.
+> Keep the mouse moving while the command runs, or use the cable. Macros are the
+> most affected: a half-written macro does nothing at all.
 
 ### Config file
 

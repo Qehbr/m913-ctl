@@ -68,6 +68,13 @@ static std::string hex2(uint8_t v) {
 // Decoding
 // -----------------------------------------------------------------------
 
+bool ack_matches(const Packet& request, const uint8_t reply[M913_PACKET_SIZE]) {
+    return reply[0] == 0x09 &&
+           reply[1] == request[1] &&
+           reply[3] == request[3] &&
+           reply[4] == request[4];
+}
+
 bool verify_reply_checksum(const uint8_t pkt[M913_PACKET_SIZE]) {
     // Device → host formula, byte[0] (report ID) excluded — the host → device
     // direction uses a different base, see compute_checksum().

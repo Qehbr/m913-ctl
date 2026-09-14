@@ -131,48 +131,87 @@ Note: Run as root or install the udev rule for non-root access:
 )";
 }
 
+// How many times one packet is sent before giving up on it, and how long each
+// attempt waits. 6 × 4 × 100 ms is 2.4 s in the worst case, while the ordinary
+// case — an awake mouse answering in ~20 ms — finishes in the first slice.
+//
+// Waiting is sliced rather than done in one long call because on WSL2/USB-IP
+// the VHCI may need a fresh URB already queued to catch interrupt data.
+static constexpr int SEND_ATTEMPTS = 6;
+static constexpr int ACK_SLICES    = 4;
+static constexpr unsigned ACK_SLICE_MS = 100;
+
+// Totals for the run, so a session that lost packets can say so at the end
+// instead of looking like it succeeded.
+struct SendStats {
+    size_t sent = 0, unacked = 0, resent = 0;
+};
+
 // -----------------------------------------------------------------------
-// Send one packet and read the ACK interrupt response.
-// The device always sends a 17-byte ACK on EP 0x82 after each config write.
-// We wait up to 1000 ms — if it times out we warn and continue
-// (wireless latency can be high).
+// Send one packet and wait for the device to acknowledge THAT packet.
+//
+// Re-sending is safe for everything this protocol carries: a write puts the
+// same bytes at the same address, a read has no side effects, and the commit
+// is sent twice by the vendor software anyway. So a packet that goes
+// unanswered is simply sent again — which also seems to help wake a mouse
+// whose radio has gone idle.
+//
+// Two things make this worth more than a bare retry loop. The acknowledgement
+// is matched to the request (see ack_matches), so a straggling answer to an
+// earlier packet cannot be mistaken for this one's; and an unanswered packet
+// is reported as such, because on this hardware a write that is never
+// acknowledged is a write that did not land.
+//
+// Returns false if the device never acknowledged it.
 // -----------------------------------------------------------------------
-static void send_cmd(UsbMouse& mouse, const Packet& p, const std::string& label) {
+static bool send_cmd(UsbMouse& mouse, const Packet& p, const std::string& label,
+                     SendStats& stats) {
     if (!label.empty())
         std::cout << "  " << label << "\n";
     std::cout << "    --> ";
     hexdump_packet(p);
-    mouse.send(p.data());
+    ++stats.sent;
 
-    // Poll for the 17-byte ACK on EP 0x82.
-    // The mouse responds within ~20 ms on native USB.  On WSL2/USB-IP the
-    // VHCI may need a fresh URB already queued to catch interrupt data, so
-    // submit 15 × 100 ms reads (1.5 s total) instead of one big wait.
     uint8_t buf[M913_PACKET_SIZE] = {};
-    int got = 0;
-    for (int attempt = 0; attempt < 15 && got == 0; ++attempt)
-        got = mouse.try_recv(buf, M913_PACKET_SIZE, INTERRUPT_EP_IN, 100);
+    for (int attempt = 0; attempt < SEND_ATTEMPTS; ++attempt) {
+        if (attempt > 0) ++stats.resent;
+        mouse.send(p.data());
 
-    if (got > 0) {
-        std::cout << "    <-- ";
-        std::cout << std::hex << std::setfill('0');
-        for (int b = 0; b < got; ++b)
-            std::cout << std::setw(2) << static_cast<int>(buf[b]) << " ";
-        std::cout << std::dec << "\n";
-    } else {
-        std::cout << "    <-- (no ACK within 1.5s)\n";
+        for (int slice = 0; slice < ACK_SLICES; ++slice) {
+            int got = mouse.try_recv(buf, M913_PACKET_SIZE, INTERRUPT_EP_IN,
+                                     ACK_SLICE_MS);
+            if (got < M913_PACKET_SIZE) continue;
+            if (!ack_matches(p, buf)) continue;   // input report, or a stale ACK
+
+            std::cout << "    <-- ";
+            std::cout << std::hex << std::setfill('0');
+            for (int b = 0; b < got; ++b)
+                std::cout << std::setw(2) << static_cast<int>(buf[b]) << " ";
+            std::cout << std::dec << std::setfill(' ');
+            if (attempt > 0)
+                std::cout << " (took " << attempt + 1 << " tries)";
+            std::cout << "\n";
+            return true;
+        }
+        if (g_stop) break;
     }
+
+    ++stats.unacked;
+    std::cout << "    <-- (NOT acknowledged after " << SEND_ATTEMPTS
+              << " tries — this packet probably did not land)\n";
+    return false;
 }
 
 // Send an entire packet sequence (keyboard-key sub-packets + config packets).
 static void send_sequence(UsbMouse& mouse,
                           const std::vector<Packet>& pkts,
-                          const std::string& heading) {
+                          const std::string& heading,
+                          SendStats& stats) {
     if (pkts.empty()) return;
     std::cout << "=== " << heading << " (" << pkts.size() << " packets) ===\n";
     for (size_t i = 0; i < pkts.size(); ++i)
         send_cmd(mouse, pkts[i], "pkt " + std::to_string(i + 1) + "/" +
-                                  std::to_string(pkts.size()));
+                                  std::to_string(pkts.size()), stats);
 }
 
 // -----------------------------------------------------------------------
@@ -182,10 +221,11 @@ static void send_sequence(UsbMouse& mouse,
 // touches no hardware — this is only the I/O half.
 // -----------------------------------------------------------------------
 static void apply_config(UsbMouse& mouse, const Config& cfg,
+                         SendStats& stats,
                          const uint8_t* btn_layout = nullptr,
                          bool is_compx = false) {
     for (auto& seq : build_config_sequences(cfg, btn_layout, is_compx))
-        send_sequence(mouse, seq.packets, seq.label);
+        send_sequence(mouse, seq.packets, seq.label, stats);
 }
 
 // -----------------------------------------------------------------------
@@ -213,7 +253,7 @@ static int fetch_block(UsbMouse& mouse, const Packet& req,
     for (int attempt = 0; attempt < 15; ++attempt) {
         int got = mouse.try_recv(rx, M913_PACKET_SIZE, INTERRUPT_EP_IN, 100);
         if (got <= 0) continue;
-        if (rx[0] == 0x09 && rx[3] == req[3] && rx[4] == req[4]) return got;
+        if (ack_matches(req, rx)) return got;
         ++skipped;
     }
     return 0;
@@ -1086,9 +1126,10 @@ int main(int argc, char* argv[]) {
         // ---- apply the merged configuration ----
         // One Config, one pass, whether it came from a file, from inline
         // flags, or from both. Built and validated at the top of this block.
+        SendStats stats;
         if (do_write) {
             std::cout << "=== Applying configuration ===\n";
-            apply_config(mouse, cfg, btn_layout, is_compx);
+            apply_config(mouse, cfg, stats, btn_layout, is_compx);
         }
 
         // ---- commit ----
@@ -1100,7 +1141,27 @@ int main(int argc, char* argv[]) {
             commit[0] = 0x08;
             commit[1] = 0x04;
             commit[16] = compute_checksum(commit);  // = 0x49
-            send_sequence(mouse, {commit, commit}, "Commit");
+            send_sequence(mouse, {commit, commit}, "Commit", stats);
+        }
+
+        // ---- report what actually got through ----
+        // A packet the mouse never acknowledged did not land, and the rest of
+        // the configuration around it did — so this is a partial write, not a
+        // failed one, and saying so beats exiting 0 on a config that is only
+        // mostly applied.
+        if (do_write && stats.unacked) {
+            std::cerr << "\nWarning: " << stats.unacked << " of " << stats.sent
+                      << " packets were never acknowledged, so the configuration"
+                         " is incomplete.\n"
+                         "         An idle 2.4GHz mouse stops answering within"
+                         " seconds — keep it moving, or use\n"
+                         "         the cable, and apply again. Macros are the"
+                         " most affected: a half-written\n"
+                         "         macro does nothing at all.\n";
+            exit_code = 1;
+        } else if (do_write && stats.resent) {
+            std::cout << "\nAll " << stats.sent << " packets acknowledged ("
+                      << stats.resent << " needed re-sending).\n";
         }
 
     } catch (const std::exception& e) {
