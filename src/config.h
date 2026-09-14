@@ -21,6 +21,15 @@ struct Config {
     // [buttons] section: button name → action string
     std::map<std::string, std::string> buttons;
 
+    // [macros] section: button name → macro spec (see parse_macro_spec).
+    //
+    // Keyed the same way as `buttons`, with the "button_" prefix, because a
+    // macro belongs to a button: the hardware has one macro region per button
+    // and no way to name or share them. Defining a macro for a button also
+    // binds that button to it, so listing the same button in both sections is
+    // a conflict rather than a combination.
+    std::map<std::string, std::string> macros;
+
     // [led] section
     struct LedConfig {
         LedMode  mode       = LedMode::Rainbow;

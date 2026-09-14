@@ -1,5 +1,6 @@
 #include "protocol.h"
 
+#include <algorithm>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -714,6 +715,93 @@ std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], 
         result.push_back(compx_packet(addr, 0x04, r, g, b, inner));
     }
 
+    return result;
+}
+
+// -----------------------------------------------------------------------
+// Macros
+// -----------------------------------------------------------------------
+
+ActionBytes macro_action(uint8_t proto_idx, uint8_t repeat) {
+    uint8_t cksum = static_cast<uint8_t>((0x55u - 0x06u - proto_idx - repeat) & 0xFF);
+    return {0x06, proto_idx, repeat, cksum};
+}
+
+bool is_macro_action(const ActionBytes& ab) {
+    if (ab[0] != 0x06) return false;
+    return ab[3] == static_cast<uint8_t>((0x55u - 0x06u - ab[1] - ab[2]) & 0xFF);
+}
+
+std::vector<Packet> build_macro_packets(uint8_t proto_idx,
+                                        const std::vector<MacroEvent>& events,
+                                        const std::string& name) {
+    if (events.size() > MACRO_MAX_EVENTS)
+        throw std::runtime_error(
+            "macro has " + std::to_string(events.size()) +
+            " events — the mouse stores at most " + std::to_string(MACRO_MAX_EVENTS));
+    if (events.empty())
+        throw std::runtime_error("macro has no events");
+
+    // Lay the region out the way the vendor tool does: a name, the count just
+    // below the events, the events, then the checksum.
+    std::vector<uint8_t> region(MACRO_REGION_SIZE, 0x00);
+
+    // The name is UTF-16, and byte 0 is its length in bytes rather than in
+    // characters — 18 for a nine-character name on the device we read.
+    size_t name_bytes = std::min(name.size() * 2, MACRO_NAME_MAX_BYTES);
+    region[0] = static_cast<uint8_t>(name_bytes);
+    for (size_t i = 0; i * 2 < name_bytes; ++i) {
+        region[1 + i * 2] = static_cast<uint8_t>(name[i]);
+        region[2 + i * 2] = 0x00;
+    }
+
+    region[MACRO_COUNT_OFFSET] = static_cast<uint8_t>(events.size());
+
+    size_t off = MACRO_EVENTS_OFFSET;
+    for (const MacroEvent& e : events) {
+        uint16_t delay = (e.delay_ms < MACRO_MIN_DELAY_MS) ? MACRO_MIN_DELAY_MS
+                                                           : e.delay_ms;
+        region[off + 0] = static_cast<uint8_t>(
+            (e.press ? MACRO_PRESS_BITS : MACRO_RELEASE_BITS) |
+            static_cast<uint8_t>(e.kind));
+        region[off + 1] = e.code;
+        region[off + 2] = 0x00;
+        region[off + 3] = static_cast<uint8_t>(delay >> 8);
+        region[off + 4] = static_cast<uint8_t>(delay & 0xFF);
+        off += MACRO_EVENT_SIZE;
+    }
+
+    // The checksum covers the count byte and the events, and nothing else —
+    // the name is outside it, which is what the device's own macros show.
+    uint16_t sum = region[MACRO_COUNT_OFFSET];
+    for (size_t i = MACRO_EVENTS_OFFSET; i < off; ++i) sum += region[i];
+    region[off] = static_cast<uint8_t>((0x55u - (sum & 0xFF)) & 0xFF);
+
+    // Write up to the checksum and no further, as the vendor tool does — it
+    // leaves the rest of the region erased rather than zeroing 384 bytes every
+    // time. Rounded up to a whole chunk.
+    size_t written = off + 1;
+    if (written % MACRO_CHUNK) written += MACRO_CHUNK - (written % MACRO_CHUNK);
+    if (written > MACRO_REGION_SIZE) written = MACRO_REGION_SIZE;
+
+    // Macro writes use the full 10-byte payload, unlike every other block in
+    // this protocol, which passes 8 explicitly.
+    std::vector<Packet> result;
+    uint16_t base = static_cast<uint16_t>(MACRO_BASE + proto_idx * MACRO_STRIDE);
+    for (size_t i = 0; i < written; i += MACRO_CHUNK) {
+        size_t   len  = std::min(MACRO_CHUNK, written - i);
+        uint16_t addr = static_cast<uint16_t>(base + i);
+        Packet p{};
+        p[0] = 0x08;
+        p[1] = 0x07;
+        p[2] = 0x00;
+        p[3] = static_cast<uint8_t>(addr >> 8);
+        p[4] = static_cast<uint8_t>(addr & 0xFF);
+        p[5] = static_cast<uint8_t>(len);
+        for (size_t b = 0; b < len; ++b) p[6 + b] = region[i + b];
+        p[16] = compute_checksum(p);
+        result.push_back(p);
+    }
     return result;
 }
 

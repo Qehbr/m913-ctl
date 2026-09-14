@@ -77,6 +77,16 @@ Options:
   --button NAME=ACTION     Remap a button, e.g. --button side1=f1
                            NAME: side1..12, left, right, middle, fire
                            (run --list-actions for valid action names)
+  --macro NAME=SPEC        Store a macro on a button and bind it. SPEC is
+                             [repeat:] step[, step ...]
+                           repeat: hold (while held), toggle (until any key),
+                                   or a count 1-253. Default 1.
+                           step:   click|down|up NAME [DELAY_MS]
+                           e.g. --macro side1="hold: click left 20"
+                           Up to 70 events; a click counts as two. Areson only.
+                           A spec may open with a quoted name, which is what
+                           the vendor software lists the macro under:
+                             --macro side1='"Spam" hold: click left 20'
 
   --list-actions           Print all valid button action names and exit
 
@@ -86,7 +96,7 @@ Options:
   --get [N]                Raw form of --save, for protocol work: print the
                            replies as hex instead of decoding them. N = one
                            block (0-68); omit N to walk all of them,
-                           including the 16 regions at 0x0301+ that --save
+                           including the 16 macro regions at 0x0300+ that --save
                            skips. Codes are Areson-derived.
 
   --raw-send HEX           Send a raw packet and stay in listen mode.
@@ -107,6 +117,8 @@ Examples:
   m913-ctl --button fire="fire:50:2"     # fire button: speed=50, repeat=2 times
   m913-ctl --button side3=media_play --button side4=media_vol_up
   m913-ctl --button side5="ctrl+c" --button side6="a+b"  # key combinations
+  m913-ctl --macro side1="hold: click left 20"   # autoclicker while held
+  m913-ctl --macro side2="3: down ctrl, click c 50, up ctrl"
 
 Note: --button and --dpi write a COMPLETE block each. Any button or DPI slot
 you do not mention is reset to its factory default — the mouse has no way to
@@ -392,6 +404,7 @@ int main(int argc, char* argv[]) {
         {"led-color",       required_argument, nullptr, 1014},
         {"led-brightness",  required_argument, nullptr, 1015},
         {"led-speed",       required_argument, nullptr, 1016},
+        {"macro",           required_argument, nullptr, 1017},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -412,6 +425,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<DpiArg>   dpi_args;
     std::vector<BtnArg>   btn_args;
+    std::vector<BtnArg>   macro_args;   // name → macro spec
     uint16_t              polling_rate_arg = 0;  // 0 = not set
 
     // Inline LED arguments. Each is only applied when its flag was given, so
@@ -593,6 +607,21 @@ int main(int argc, char* argv[]) {
             break;
         }
 
+        case 1017: {  // --macro NAME=SPEC
+            std::string arg = optarg;
+            auto eq = arg.find('=');
+            if (eq == std::string::npos) {
+                std::cerr << "Error: --macro expects NAME=SPEC "
+                          << "(e.g. --macro side1=\"hold: click left 20\")\n";
+                return 1;
+            }
+            std::string bname = arg.substr(0, eq);
+            if (bname.rfind("button_", 0) != 0)
+                bname = "button_" + bname;
+            macro_args.push_back({bname, arg.substr(eq + 1)});
+            break;
+        }
+
         case 1013: {  // --save [FILE]
             do_save = true;
             // Same two-form handling as --listen and --get.
@@ -676,13 +705,31 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ---- validate --macro arguments up front ----
+    // Same reason as the --button check above: nothing should be written until
+    // every binding in the run is known to be storable.
+    for (auto& [name, spec] : macro_args) {
+        Button btn;
+        if (!parse_button_name(name, btn)) {
+            std::cerr << "Error: unknown button name '" << name << "'\n";
+            return 1;
+        }
+        uint8_t repeat = 1;
+        std::vector<MacroEvent> events;
+        std::string err;
+        if (!parse_macro_spec(spec, repeat, events, err)) {
+            std::cerr << "Error: macro for " << name << ": " << err << "\n";
+            return 1;
+        }
+    }
+
     // ---- validate that there's something to do ----
     bool has_led_arg = led_mode_set || led_color_set || led_bright_set || led_speed_set;
     bool has_work = do_probe || do_probe_commands || do_listen || do_get || do_save ||
                     !raw_send_hex.empty() ||
                     !config_file.empty() ||
                     !dpi_args.empty() || has_led_arg || !btn_args.empty() ||
-                    polling_rate_arg != 0;
+                    !macro_args.empty() || polling_rate_arg != 0;
     if (!has_work) {
         print_help(argv[0]);
         return 0;
@@ -812,6 +859,15 @@ int main(int argc, char* argv[]) {
         for (auto& [name, action_str] : btn_args) {
             cfg.buttons[name] = action_str;
             do_write          = true;
+        }
+
+        for (auto& [name, spec] : macro_args) {
+            cfg.macros[name] = spec;
+            // An inline --macro overrides whatever the file bound that button
+            // to, since a macro binds its own button and the two cannot both
+            // apply. Without this, validate_config() would reject the pair.
+            cfg.buttons.erase(name);
+            do_write = true;
         }
 
         if (do_write)

@@ -58,8 +58,17 @@ small harnesses against the real sources and checks behaviour directly:
   wrong address on either side breaks it. This is what makes `--save`
   trustworthy without a mouse to hand. It also checks that an erased
   (all-`0xFF`) device decodes to reported gaps rather than invented values.
-- **CLI surface**, including that every `--led*` value is rejected during option
-  parsing, before the device is opened.
+- **Macros.** The encoding was recovered from the vendor software and then
+  confirmed on a real mouse ([MACRO-PROTOCOL.md](MACRO-PROTOCOL.md)), and the
+  suite pins the bytes to what that testing established: the count at offset
+  `0x1f`, five-byte events from `0x20`, `0x80`/`0x40` for press/release, the
+  3 ms delay floor, the trailing checksum over count-plus-events, the 70-event
+  cap, modifiers going out as ordinary keys rather than modifier events, and a
+  macro's region being written *before* the mapping that points at it. Three of
+  those were wrong before hardware corrected them, so they are worth keeping
+  pinned.
+- **CLI surface**, including that every `--led*` and `--macro` value is rejected
+  during option parsing, before the device is opened.
 
 The hardware half detects the mouse in sysfs (so no bus path is hardcoded) and
 covers signal handling, driver reattachment, a full config apply, and

@@ -233,6 +233,22 @@ bool decode_device_config(const BlockMap& blocks, Config& out, DecodeReport& rep
             continue;
         }
 
+        if (is_macro_action(ab)) {
+            // The binding is decodable but the macro itself is not: the read
+            // codes do not cover the 0x0300+ regions, and nothing decodes the
+            // event list yet. Say so rather than reporting unknown bytes for a
+            // config this tool may well have written itself.
+            std::string repeat = (ab[2] == MACRO_REPEAT_HOLD)   ? "hold"
+                               : (ab[2] == MACRO_REPEAT_TOGGLE) ? "toggle"
+                               : std::to_string(ab[2]);
+            report.unnamed_buttons[name] = "<macro, repeat=" + repeat +
+                                           "; the events cannot be read back yet>";
+            report.warnings.push_back(
+                name + " runs a macro (repeat=" + repeat + "); its events are "
+                "not read back, so they are missing from this file");
+            continue;
+        }
+
         std::string action = action_name(ab);
         if (action.empty()) {
             report.unnamed_buttons[name] = "<" + hex2(ab[0]) + " " + hex2(ab[1]) +

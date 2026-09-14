@@ -1,6 +1,7 @@
 #include "config.h"
 #include "data.h"
 
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <regex>
@@ -238,6 +239,12 @@ Config parse_config_file(const std::string& path) {
             } else if (section == "buttons") {
                 cfg.buttons[key] = value;
 
+            } else if (section == "macros") {
+                // Accept "side1" as well as "button_side1", as --button does.
+                std::string name = key;
+                if (name.rfind("button_", 0) != 0) name = "button_" + name;
+                cfg.macros[name] = value;
+
             } else if (section == "mouse") {
                 if (key == "polling_rate") {
                     try {
@@ -315,6 +322,32 @@ std::vector<ConfigSequence> build_config_sequences(const Config& cfg,
         if (ab[0] == 0x90 && ab[3] > 1)
             register_multikey_action(static_cast<uint8_t>(btn), action_str);
     }
+
+    // ---- Macros ----
+    // The region write comes first and the mapping that points at it second,
+    // so a half-applied config leaves a button pointing at a macro that is
+    // already there rather than at one that is not.
+    std::vector<ConfigSequence> macro_seqs;
+    for (auto& [key, spec] : cfg.macros) {
+        Button btn;
+        if (!parse_button_name(key, btn)) continue;
+        uint8_t repeat = 1;
+        std::vector<MacroEvent> events;
+        std::string err;
+        std::string name = MACRO_NAME;
+        if (!parse_macro_spec(spec, repeat, events, err, &name)) continue;
+
+        uint8_t proto = layout ? layout[static_cast<uint8_t>(btn)]
+                              : static_cast<uint8_t>(btn);
+        macro_seqs.push_back({"Macro for " + key,
+                              build_macro_packets(proto, events, name)});
+        // Binding the button is part of storing the macro: the action bytes
+        // are what make the mouse run it, and they carry the repeat mode.
+        btn_changes[static_cast<uint8_t>(btn)] = macro_action(proto, repeat);
+    }
+    for (auto& seq : macro_seqs)
+        out.push_back(seq);
+
     if (!btn_changes.empty())
         out.push_back({"Button mapping", build_button_mapping(btn_changes, layout)});
 
@@ -479,6 +512,16 @@ std::string config_to_ini(const Config& cfg,
         out += "\n";
     }
 
+    if (!cfg.macros.empty()) {
+        out += "[macros]\n";
+        for (Button b : button_ini_order()) {
+            auto it = cfg.macros.find(button_ini_name(b));
+            if (it != cfg.macros.end())
+                out += it->first.substr(strlen("button_")) + "=" + it->second + "\n";
+        }
+        out += "\n";
+    }
+
     if (!cfg.buttons.empty() || !commented.empty()) {
         out += "[buttons]\n";
         for (Button b : button_ini_order()) {
@@ -546,5 +589,31 @@ void validate_config(const Config& cfg, bool is_compx) {
                 "Action '" + action + "' for button " + key + " combines " +
                 std::to_string(tokens) + " modifiers+keys — the mouse stores at "
                 "most " + std::to_string(MAX_COMBO_TOKENS) + " per binding");
+    }
+
+    for (auto& [key, spec] : cfg.macros) {
+        Button btn;
+        if (!parse_button_name(key, btn))
+            throw std::runtime_error("Unknown button name in [macros]: " + key);
+
+        // The macro address table and the action code were read out of Areson
+        // software. Compx uses different addressing throughout, and none of it
+        // has been captured, so there is nothing to write there.
+        if (is_compx)
+            throw std::runtime_error(
+                "macros are not supported on this (Compx) hardware — the macro "
+                "storage layout is only known for the Areson revision");
+
+        // A macro binds its own button, so the two sections would fight.
+        if (cfg.buttons.count(key))
+            throw std::runtime_error(
+                key + " is set in both [buttons] and [macros] — defining a macro "
+                "already binds that button to it, so remove one of the two");
+
+        uint8_t repeat = 1;
+        std::vector<MacroEvent> events;
+        std::string err;
+        if (!parse_macro_spec(spec, repeat, events, err))
+            throw std::runtime_error("Macro for " + key + ": " + err);
     }
 }

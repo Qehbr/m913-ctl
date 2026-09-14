@@ -27,6 +27,8 @@ The Compx revision differs in a few ways — see [Compx hardware notes](#compx-h
 - **Config files** — INI format for saving and sharing configurations
 - **Read-back** — `--save` decodes the mouse's stored configuration into an INI
   file you can edit and re-apply (Areson)
+- **Macros** — up to 70 events per button, with per-event delays and a hardware
+  repeat-while-held mode (Areson)
 
 ## GUI
 
@@ -221,7 +223,9 @@ left clicks.
 - `fire` — default burst (speed 58, 3 clicks)
 - `fire:speed:times` — `speed` 3–255 (lower = faster), `times` = clicks per press, **0–3**
 
-> **This is not an autoclicker.** `times` is a fixed number of clicks per press,
+> **This is not an autoclicker** — [macros](#macros) are, via
+> `hold: click left 20`, which repeats for as long as the button is held.
+> `times` is a fixed number of clicks per press,
 > not a repeat-while-held mode, and **3 is a hardware ceiling**, not a
 > conservative choice. Measured on `25a7:fa07`:
 >
@@ -263,6 +267,78 @@ is rejected with an error.
 - Modifier + key: `ctrl+c`, `shift+f4`, `alt+f4`, `ctrl+shift+z`
 - Multi-key: `a+b`, `a+b+c`
 - Modifiers: `ctrl`, `shift`, `alt`, `super` (or `ctrl_l`, `ctrl_r`, `shift_l`, etc.)
+
+## Macros
+
+The macro encoding was recovered by static analysis of the vendor software and
+then confirmed on a real mouse — autoclicker, modified keystrokes, per-event
+delays and all three repeat modes. See
+[docs/MACRO-PROTOCOL.md](docs/MACRO-PROTOCOL.md) for the full format, including
+the three things static analysis got wrong. **Areson only**: the Compx revision
+uses different addressing that has never been captured.
+
+Each button has its own macro — the mouse stores one 384-byte macro region per
+button, and there is no shared pool of numbered macro slots. Defining a macro
+for a button therefore also binds that button to it.
+
+```ini
+[macros]
+side1 = hold: click left 20
+side2 = 3: down ctrl, click c 50, up ctrl
+side3 = click a 100, click b 100, click c 100
+```
+
+Or on the command line:
+
+```bash
+m913-ctl --macro side1="hold: click left 20"
+```
+
+A spec is `["name"] [repeat:] step[, step ...]`.
+
+| Repeat | Meaning |
+|---|---|
+| *omitted* | run the macro once |
+| `1`–`253` | run it that many times |
+| `hold` | **repeat while the button is held** |
+| `toggle` | repeat until any key is pressed |
+
+The optional **name** is what the vendor Windows software lists the macro
+under, so `"Auto Click" hold: click left 20` shows up as `Auto Click` in its
+macro list. Up to 15 characters; it is cosmetic and the mouse ignores it.
+
+A step is `click|down|up NAME [DELAY_MS]`:
+
+- `click` presses and releases; `down` and `up` do one or the other, so a macro
+  can hold a modifier across several keys.
+- `NAME` resolves exactly as a button action does — mouse buttons first, then
+  modifiers, then keys. So `left` is the **mouse button** and `arrow_left` is
+  the arrow key. Mouse buttons: `left`, `right`, `middle`, `back`, `forward`.
+- `DELAY_MS` is the pause stored on each event the step generates, 0–65535.
+  The firmware's floor is 3 ms and anything lower is stored as 3.
+
+Limits, all taken from the vendor software's own constants:
+
+- **70 events** per macro, and a `click` counts as two.
+- Repeat counts stop at 253; 254 and 255 are the two loop modes.
+- `hold` is the vendor software's "Cycle Until the Key Released", and `toggle`
+  is its "Cycle Until any key pressed".
+- Modifiers are sent as ordinary keys rather than as modifier events. Both
+  encodings work for a short macro, but a modifier event silently kills any
+  macro longer than about ten events — so the tool always uses the form that
+  does not. `super` works as a result, which the other encoding cannot express.
+
+`hold: click left 20` is the autoclicker the fire button cannot do: `fire` is a
+fixed burst of at most three clicks, while a held macro repeats indefinitely.
+
+See [examples/example_macros.ini](examples/example_macros.ini) for a complete
+example, including an autoclicker and a held-modifier sequence.
+
+> **Keep the mouse moving, or use the cable.** A macro is only a handful of
+> packets, but an idle 2.4 GHz mouse stops answering within seconds and a write
+> that gets no acknowledgement has not been applied — the region then holds a
+> half-written macro, which simply does nothing. If a macro does not fire, apply
+> it again with the mouse in use.
 
 ## LED settings
 

@@ -446,12 +446,198 @@ chk "all 16 buttons were named"                           "unnamed=0"   "$RT"
 chk "an erased device names no buttons"                   "ERASED buttons=16 named=0" "$RT"
 chk "an erased device still writes a parseable INI"       "iniparses=1" "$RT"
 
+hdr "Macros"
+# The macro encoding came out of the vendor binaries and was then confirmed on
+# a real mouse (docs/MACRO-PROTOCOL.md). Static analysis got three things wrong
+# — the press/release bits, the two loop modes, and the checksum's coverage —
+# and a fourth, modifiers, only testing could have found. These checks pin the
+# bytes to what the hardware established, so any future change to them is a
+# deliberate edit rather than a silent drift back.
+cat > "$TMP/macro.cpp" <<'EOF'
+#include "config.h"
+#include "data.h"
+#include <cstdio>
+#include <cstring>
+
+static int fails = 0;
+static void eq(const char* what, long a, long b) {
+    if (a != b) { printf("BAD %s: %ld != %ld\n", what, a, b); ++fails; }
+}
+
+int main() {
+    // ---- accepted and rejected specs ----
+    const char* good[] = {"click left", "hold: click left 20", "toggle: click a",
+                          "253: down ctrl, up ctrl", "up f5 65535",
+                          "down back, up forward", "hold: down super, up super"};
+    const char* bad[]  = {"", "bogus: click left", "click nosuchkey", "click",
+                          "sideways left", "254: click left", "0: click left",
+                          "click left -1", "click a,, up a", "click left 70000"};
+    for (auto s : good) {
+        uint8_t r; std::vector<MacroEvent> e; std::string err;
+        if (!parse_macro_spec(s, r, e, err)) { printf("REJECTED-GOOD '%s': %s\n", s, err.c_str()); ++fails; }
+    }
+    for (auto s : bad) {
+        uint8_t r; std::vector<MacroEvent> e; std::string err;
+        if (parse_macro_spec(s, r, e, err)) { printf("ACCEPTED-BAD '%s'\n", s); ++fails; }
+    }
+
+    // ---- the event cap: a click is two events ----
+    std::string c35, c36;
+    for (int i = 0; i < 35; ++i) c35 += (i ? ", " : "") + std::string("click left");
+    for (int i = 0; i < 36; ++i) c36 += (i ? ", " : "") + std::string("click left");
+    uint8_t r; std::vector<MacroEvent> e; std::string err;
+    if (!parse_macro_spec(c35, r, e, err)) { printf("BAD 70 events rejected\n"); ++fails; }
+    eq("70 events", (long)e.size(), 70);
+    if (parse_macro_spec(c36, r, e, err))  { printf("BAD 72 events accepted\n"); ++fails; }
+
+    // ---- the action bytes that bind a button to its macro ----
+    ActionBytes a = macro_action(0, MACRO_REPEAT_HOLD);
+    eq("action[0]", a[0], 0x06);
+    eq("action[1]", a[1], 0x00);
+    eq("action[2]", a[2], 0xfe);
+    eq("action[3]", a[3], (0x55 - 0x06 - 0x00 - 0xfe) & 0xFF);
+    if (!is_macro_action(a)) { printf("BAD is_macro_action\n"); ++fails; }
+    ActionBytes kb = KB_LIST_MARKER;
+    if (is_macro_action(kb)) { printf("BAD keyboard marker read as a macro\n"); ++fails; }
+    // The repeat byte rides in the action, so it must reach byte 2 verbatim.
+    eq("repeat toggle", macro_action(5, MACRO_REPEAT_TOGGLE)[2], 0xff);
+    eq("repeat count",  macro_action(5, 7)[2], 7);
+    eq("proto index",   macro_action(5, 7)[1], 5);
+
+    // ---- region layout ----
+    parse_macro_spec("hold: click left 20", r, e, err);
+    auto pkts = build_macro_packets(3, e);
+    uint8_t mem[0x180];
+    memset(mem, 0xAA, sizeof mem);          // 0xAA so gaps are visible
+    int covered = 0;
+    for (auto& p : pkts) {
+        eq("write sub-command", p[1], 0x07);
+        eq("chunk length", p[5] <= MACRO_CHUNK, 1);
+        unsigned addr = (unsigned)((p[3] << 8) | p[4]);
+        eq("in button 3's region", addr >= MACRO_BASE + 3 * MACRO_STRIDE &&
+                                   addr <  MACRO_BASE + 4 * MACRO_STRIDE, 1);
+        unsigned off = addr - (MACRO_BASE + 3 * MACRO_STRIDE);
+        for (unsigned k = 0; k < p[5]; ++k) { mem[off + k] = p[6 + k]; ++covered; }
+    }
+    // Only as far as the checksum is written, as the vendor tool does; the
+    // rest of the region is left alone. 2 events end at 0x2a, rounded to 0x2e.
+    eq("writes reach the checksum", covered >= 0x2b, 1);
+    eq("but not the whole region", covered < MACRO_REGION_SIZE, 1);
+    eq("event count byte", mem[MACRO_COUNT_OFFSET], 2);
+    eq("press event byte 0", mem[0x20], MACRO_PRESS_BITS | (int)MacroKind::Mouse);
+    eq("press code",         mem[0x21], 0x01);
+    eq("press pad",          mem[0x22], 0x00);
+    eq("delay high",         mem[0x23], 0x00);
+    eq("delay low",          mem[0x24], 20);
+    eq("release event byte 0", mem[0x25], MACRO_RELEASE_BITS | (int)MacroKind::Mouse);
+    // Checksum: (0x55 - sum of every byte before it) & 0xFF, stored right after
+    // the last event -- the same formula as every other block in this protocol.
+    unsigned sum = mem[MACRO_COUNT_OFFSET], end = 0x20 + 2 * MACRO_EVENT_SIZE;
+    for (unsigned i = MACRO_EVENTS_OFFSET; i < end; ++i) sum += mem[i];
+    eq("trailing checksum", mem[end], (0x55 - (sum & 0xFF)) & 0xFF);
+    // Padding between the checksum and the end of the last chunk is zeroed;
+    // past that the region is left as it was, which is what the vendor tool
+    // does rather than rewriting 384 bytes every time.
+    eq("byte after the checksum is zeroed", mem[end + 1], 0);
+
+    // Modifiers must go out as ordinary keys (HID usage 0xe0..0xe7), not as
+    // MacroKind::Modifier events: on hardware a modifier event silently kills
+    // any macro longer than about ten events, while the same macro with the
+    // modifier as a key runs fine. See docs/MACRO-PROTOCOL.md.
+    parse_macro_spec("down shift, up ctrl_r", r, e, err);
+    eq("modifier is sent as a key", (long)e[0].kind, (long)MacroKind::Key);
+    eq("left shift usage",          e[0].code, 0xe1);
+    eq("right ctrl usage",          e[1].code, 0xe4);
+    // And super is usable that way, which the modifier-bitmask form cannot do.
+    eq("super accepted", (long)parse_macro_spec("down super", r, e, err), 1L);
+    eq("super usage",    e[0].code, 0xe3);
+
+    // ---- delays are clamped up to the firmware floor ----
+    parse_macro_spec("click left 0", r, e, err);
+    auto p0 = build_macro_packets(0, e);
+    uint8_t m0[0x180] = {0};
+    for (auto& p : p0) {
+        unsigned addr = (unsigned)((p[3] << 8) | p[4]) - MACRO_BASE;
+        for (unsigned k = 0; k < p[5]; ++k) m0[addr + k] = p[6 + k];
+    }
+    eq("delay floor", m0[0x24], MACRO_MIN_DELAY_MS);
+
+    // ---- spec round-trip ----
+    const char* specs[] = {"click left", "hold: click left 20",
+                           "3: down ctrl, click c 50, up ctrl",
+                           "toggle: click arrow_left 100, up shift_r"};
+    for (auto s : specs) {
+        uint8_t r1, r2; std::vector<MacroEvent> e1, e2; std::string err1;
+        parse_macro_spec(s, r1, e1, err1);
+        std::string back = macro_spec_string(r1, e1);
+        if (!parse_macro_spec(back, r2, e2, err1) || r1 != r2 || e1.size() != e2.size()) {
+            printf("BAD respell '%s' -> '%s'\n", s, back.c_str()); ++fails; continue;
+        }
+        for (size_t i = 0; i < e1.size(); ++i)
+            if (e1[i].kind != e2[i].kind || e1[i].code != e2[i].code ||
+                e1[i].press != e2[i].press || e1[i].delay_ms != e2[i].delay_ms) {
+                printf("BAD respell event '%s' -> '%s'\n", s, back.c_str()); ++fails; break;
+            }
+    }
+
+    // ---- a macro in a Config produces the region write AND the binding ----
+    Config cfg;
+    cfg.macros["button_side1"] = "hold: click left 20";
+    validate_config(cfg, false);
+    auto seqs = build_config_sequences(cfg, nullptr, false);
+    bool saw_macro = false, saw_map = false;
+    for (auto& s : seqs) {
+        if (s.label.find("Macro") != std::string::npos) saw_macro = true;
+        if (s.label == "Button mapping") {
+            saw_map = true;
+            if (!saw_macro) { printf("BAD mapping sent before the macro data\n"); ++fails; }
+            // Side1 is protocol index 0 on Areson, so its action is in packet 0
+            // at bytes 6..9.
+            const Packet& p = s.packets.front();
+            eq("bound action[0]", p[6], 0x06);
+            eq("bound action[2]", p[8], 0xfe);
+        }
+    }
+    if (!saw_macro || !saw_map) { printf("BAD sequences: macro=%d map=%d\n", saw_macro, saw_map); ++fails; }
+
+    // ---- refusals ----
+    int threw = 0;
+    try { validate_config(cfg, true); } catch (const std::exception&) { threw = 1; }
+    eq("Compx refuses macros", threw, 1);
+    Config both;
+    both.macros["button_side1"]  = "click left";
+    both.buttons["button_side1"] = "f5";
+    threw = 0;
+    try { validate_config(both, false); } catch (const std::exception&) { threw = 1; }
+    eq("button in both sections refused", threw, 1);
+
+    printf("MACRO fails=%d packets=%zu\n", fails, pkts.size());
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/macro.cpp" $SRC_ALL -o "$TMP/macro" 2>/dev/null
+MC="$("$TMP/macro" 2>&1)"
+chk "macro encoding matches the vendor analysis" "MACRO fails=0" "$MC"
+chk "a 2-event macro is 5 packets, not the whole region" "packets=5" "$MC"
+[[ "$MC" == *"MACRO fails=0"* ]] || printf "%s\n" "$MC" | head -20
+
 hdr "CLI surface"
 chk "--profile is gone"          "unrecognized option" "$($CTL --profile 2 2>&1)"
 chk "--probe-commands in --help" "--probe-commands"    "$($CTL --help 2>&1)"
 chk "--get in --help"            "--get"               "$($CTL --help 2>&1)"
 chk "--save in --help"           "--save"              "$($CTL --help 2>&1)"
 chk "--led-color in --help"      "--led-color"         "$($CTL --help 2>&1)"
+chk "--macro in --help"          "--macro NAME=SPEC"   "$($CTL --help 2>&1)"
+chk "--macro documents the name syntax" "quoted name" "$($CTL --help 2>&1)"
+chk "--macro rejects a bad repeat"  "not a repeat mode"  "$($CTL --macro side1='x: click left' 2>&1)"
+chk "--macro rejects a bad key"     "not a key or mouse" "$($CTL --macro side1='click nope' 2>&1)"
+# super is legal now that modifiers go out as ordinary keys (HID usage 0xe3);
+# getting as far as looking for the device is proof it passed validation.
+chk "--macro accepts super"         "Could not find"     "$($CTL --macro side1='down super' 2>&1)"
+chk "--macro rejects a bad button"  "unknown button"     "$($CTL --macro nope='click left' 2>&1)"
+chk "--macro needs NAME=SPEC"       "expects NAME=SPEC"  "$($CTL --macro side1 2>&1)"
+chk "a bad --macro never opens the device" "0" \
+    "$($CTL --macro side1='click nope' 2>&1 | grep -c Connected)"
 chk "whole-block writes documented in --help" "reset to its factory default" \
     "$($CTL --help 2>&1)"
 

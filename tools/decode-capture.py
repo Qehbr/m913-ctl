@@ -57,16 +57,18 @@ ADDRESS_MAP = [
     (0x0020, 0x002B, "unknown"),
     (0x002C, 0x003F, "Areson: 'unknown_2' block sent after DPI"
                      " / Compx: per-stage LED colours"),
-    (0x0040, 0x0053, "unknown"),
-    (0x0054, 0x005D, "LED: colour, mode, brightness, speed"),
+    (0x0040, 0x004B, "unknown"),
+    (0x004C, 0x0051, "DpiRGB — per-DPI-stage colour"),
+    (0x0052, 0x0053, "unknown"),
+    (0x0054, 0x005D, "LED (LogoRGB): colour, mode, brightness, speed"),
     (0x005E, 0x005F, "unknown"),
     (0x0060, 0x009F, "button mapping, 16 buttons x 4 bytes"),
-    (0x00A0, 0x00FF, "unknown"),
+    (0x00A0, 0x00A6, "MainRGB"),
+    (0x00A7, 0x00FF, "unknown"),
     (0x0100, 0x02EF, "keyboard/consumer event lists, 16 buttons x 0x20"),
-    (0x02F0, 0x0300, "unknown"),
-    # 16 x 0x180 starting at 0x0301, so the last one runs to 0x1B00.
-    (0x0301, 0x1B00, "16 regions of 384 bytes, read as erased flash (0xFF)"
-                     " — PURPOSE UNKNOWN, prime macro candidate"),
+    (0x02F0, 0x02FF, "unknown"),
+    # 16 x 0x180 starting at 0x0300, so the last one runs to 0x1AFF.
+    (0x0300, 0x1AFF, "per-button MACRO, 16 regions of 384 bytes"),
 ]
 
 SUBCOMMANDS = {
@@ -93,8 +95,8 @@ def region_of(addr):
                 note += f"  (button {(addr - 0x0060) // 4})"
             elif name.startswith("keyboard"):
                 note += f"  (button {(addr - 0x0100) // 0x20})"
-            elif name.startswith("16 regions"):
-                note += f"  (region {(addr - 0x0301) // 0x180})"
+            elif name.startswith("per-button MACRO"):
+                note += f"  (button {(addr - 0x0300) // 0x180}, byte {(addr - 0x0300) % 0x180})"
             return note
     return "outside every known range"
 

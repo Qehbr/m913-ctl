@@ -214,6 +214,108 @@ int compx_active_dpi_stage_count(const std::array<bool, DPI_SLOTS>& enabled);
 std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], int n_slots);
 
 // -----------------------------------------------------------------------
+// Macros
+//
+// Every button has its own 384-byte macro region; there is no shared pool of
+// macro slots and nothing numbers them. A button's action bytes say "run the
+// macro", and the mouse reads the region belonging to that button.
+//
+// Layout of one region — read off a real mouse that the vendor software had
+// written macros to, and cross-checked field by field against what its UI
+// displayed for them (docs/MACRO-PROTOCOL.md):
+//
+//   0x00         length of the macro's name IN BYTES (UTF-16, so 2 per char)
+//   0x01..0x1e   the name, UTF-16LE, zero padded
+//   0x1f         event count, 1..MACRO_MAX_EVENTS
+//   0x20 + 5*i   one event, five bytes:
+//                  [0] 0x80 for press, 0x40 for release, or'd with the kind
+//                  [1] code — meaning depends on the kind
+//                  [2] always 0
+//                  [3] delay, high byte      (milliseconds, big-endian)
+//                  [4] delay, low byte
+//   0x20 + 5*n   (0x55 - (count + every event byte)) & 0xFF
+//
+// The checksum covers the count byte and the events only — NOT the name. That
+// is not a guess: it is the only reading that reproduces the checksums the
+// vendor software left on the device.
+//
+// The name is cosmetic, for the vendor UI's macro list. The firmware cannot be
+// reading it, since the checksum would not survive an edit to it.
+// -----------------------------------------------------------------------
+static constexpr uint16_t MACRO_BASE          = 0x0300;
+static constexpr uint16_t MACRO_STRIDE        = 0x0180;
+static constexpr uint16_t MACRO_REGION_SIZE   = 0x0180;
+static constexpr uint16_t MACRO_COUNT_OFFSET  = 0x001f;
+static constexpr uint16_t MACRO_EVENTS_OFFSET = 0x0020;
+static constexpr size_t   MACRO_EVENT_SIZE    = 5;
+static constexpr size_t   MACRO_MAX_EVENTS    = 70;
+
+// The vendor encoder clamps every delay up to this, which is why its decoder
+// reads a stored 3 back as "no delay": 3 ms is the floor the firmware honours.
+static constexpr uint16_t MACRO_MIN_DELAY_MS = 3;
+
+// Macro writes are the one place this protocol uses the full 10-byte payload.
+// Every other block passes 8 explicitly, which is why the templates step by 8.
+static constexpr size_t MACRO_CHUNK = 10;
+
+// What an event acts on. The byte stored is the same code this tool already
+// uses elsewhere for that kind of thing — no vendor numbering to translate.
+enum class MacroKind : uint8_t {
+    Modifier = 0,  // code = HID modifier bitmask (ctrl 0x01 … right alt 0x40)
+    Key      = 1,  // code = HID keyboard usage code
+    Mouse    = 4,  // code = mouse bitmask (left 0x01 … forward 0x10)
+};
+
+struct MacroEvent {
+    MacroKind kind     = MacroKind::Key;
+    uint8_t   code     = 0;
+    bool      press    = true;   // false = release
+    uint16_t  delay_ms = MACRO_MIN_DELAY_MS;
+};
+
+// Repeat values for macro_action(). Anything from 1 to 0xFD is a literal
+// number of passes; the two named values are the firmware's own loop modes.
+//
+// Which of 0xFE / 0xFF is which was settled on hardware: the vendor software
+// was pointed at three macros set to "cycle until the key released", "cycle
+// until any key pressed" and "cycle 3 times", and the bytes it left in the
+// mapping block were 0xFE, 0xFF and 0x03 respectively. The disassembly alone
+// gave the opposite pairing, because the UI's radio-button order is not the
+// order of the mode enum behind it.
+static constexpr uint8_t MACRO_REPEAT_HOLD   = 0xFE;  // repeat while held
+static constexpr uint8_t MACRO_REPEAT_TOGGLE = 0xFF;  // until any key pressed
+static constexpr uint8_t MACRO_REPEAT_MAX    = 0xFD;
+
+// Event byte 0 carries the press/release flag in its top bits. Confirmed
+// against the vendor's stored macros: every event the UI showed as a key-down
+// is 0x8n on the device and every key-up is 0x4n.
+static constexpr uint8_t MACRO_PRESS_BITS   = 0x80;
+static constexpr uint8_t MACRO_RELEASE_BITS = 0x40;
+
+// The name written into a macro's header when the spec does not give one.
+// Cosmetic — it is what the vendor software lists the macro under, and it sits
+// outside the checksum.
+static constexpr const char* MACRO_NAME = "m913-ctl";
+
+// Room for the name: everything between the length byte at 0 and the count at
+// 0x1f, and it is stored UTF-16, so half that many characters.
+static constexpr size_t MACRO_NAME_MAX_BYTES = MACRO_COUNT_OFFSET - 1;
+
+// The four action bytes that point a button at its own macro. proto_idx is the
+// protocol button index, i.e. after any layout translation.
+ActionBytes macro_action(uint8_t proto_idx, uint8_t repeat);
+
+// True if these bytes are a macro binding (as written by macro_action).
+bool is_macro_action(const ActionBytes& ab);
+
+// Build the packets that store one macro in a button's region. The whole
+// region is written, zero-filled past the last event, as the vendor tool does.
+// Throws std::runtime_error if there are more than MACRO_MAX_EVENTS events.
+std::vector<Packet> build_macro_packets(uint8_t proto_idx,
+                                        const std::vector<MacroEvent>& events,
+                                        const std::string& name = MACRO_NAME);
+
+// -----------------------------------------------------------------------
 // Configuration read-back (--get)
 //
 // A replay of one vendor-software session captured from Areson hardware.
