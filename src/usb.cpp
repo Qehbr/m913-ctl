@@ -97,10 +97,17 @@ void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
     // device ACK would blame the resulting timeout on device latency
     // rather than a truncated SET_REPORT.
     //
-    // This throws where a missing ACK only warns (send_cmd() in main.cpp).
-    // The asymmetry is deliberate: a missing ACK means the outcome is
-    // unknown — the link is slow and the write may well have landed —
-    // whereas a short write means the packet demonstrably did not arrive.
+    // This throws rather than being retried, which is the opposite of how an
+    // unacknowledged packet is handled (send_cmd() in main.cpp re-sends it up
+    // to six times). The distinction is where the failure happened: a short
+    // write means the host could not even put the packet on the wire intact,
+    // so sending it again is not a recovery, it is a loop. A missing
+    // acknowledgement is a loss out on the link, which a re-send can fix.
+    //
+    // Note this comment used to say a missing ACK left the outcome unknown
+    // because the write "may well have landed". It does not: an unacknowledged
+    // write does not land, which is why send_cmd() now retries and the run
+    // exits non-zero if anything is still unanswered at the end.
     if (r != M913_PACKET_SIZE) {
         std::ostringstream oss;
         oss << "Control transfer (send) wrote only " << r << " of "
