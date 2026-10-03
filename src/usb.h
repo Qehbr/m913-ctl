@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -60,6 +61,12 @@ public:
     // rather than throwing — a timeout is the normal case here, since the
     // mouse only answers when it has something to say.
     //
+    // buf_size is rounded down internally to a whole number of endpoint
+    // packets, because an interrupt read of any other length fails with
+    // LIBUSB_ERROR_OVERFLOW as soon as data arrives. Callers may therefore
+    // pass whatever their buffer happens to be; see try_recv() for the
+    // measurements behind this.
+    //
     // This takes the NEXT packet on the endpoint, which is not necessarily a
     // reply to anything: EP 0x82 also carries HID input reports while the
     // mouse is in use. Callers that need the answer to a specific request
@@ -68,6 +75,16 @@ public:
     // Returns the number of bytes received. buf must hold buf_size bytes.
     int try_recv(uint8_t* buf, int buf_size, uint8_t endpoint = INTERRUPT_EP_IN,
                  unsigned int timeout_ms = 500);
+
+    // wMaxPacketSize for an IN endpoint, or 0 if the device does not have it.
+    //
+    // Reading exactly one packet is what a protocol watcher wants: a larger
+    // (legal) request lets libusb concatenate several reports into one
+    // transfer, which then prints as a single oversized "packet".
+    int max_packet(uint8_t endpoint) const {
+        auto it = _max_packet.find(endpoint);
+        return it == _max_packet.end() ? 0 : it->second;
+    }
 
     // Print all USB interfaces and endpoints for this device to stdout.
     void probe();
@@ -83,6 +100,10 @@ private:
     bool     _detached_iface2 = false;
     int      _num_interfaces   = 2;
     uint16_t _ctrl_value       = CTRL_VALUE;
+
+    // endpoint address -> wMaxPacketSize, filled from the config descriptor
+    // when the device is opened. Used to keep interrupt reads a legal length.
+    std::map<uint8_t, int> _max_packet;
 
     void _claim_interface(int iface, bool& detached_flag);
     void _release_interface(int iface, bool detached_flag);

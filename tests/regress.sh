@@ -671,6 +671,26 @@ int main() {
     try { validate_config(both, false); } catch (const std::exception&) { threw = 1; }
     eq("button in both sections refused", threw, 1);
 
+    // ---- modifiers are accepted, and go out as keys not as kind 0 ----
+    // This lives here rather than in the CLI section because the only way to
+    // prove acceptance through the CLI is to let the command reach the device,
+    // which both needs hardware absent to "pass" and rewrites a real button.
+    {
+        std::vector<MacroEvent> ev;
+        std::string err;
+        uint8_t rep = 0;
+        int ok = parse_macro_spec("down super", rep, ev, err) ? 1 : 0;
+        eq("super is accepted", ok, 1);
+        if (ok && ev.size() == 1) {
+            eq("super goes out as a key, not kind 0",
+               static_cast<int>(ev[0].kind), static_cast<int>(MacroKind::Key));
+            eq("super carries its HID usage", ev[0].code, 0xe3);
+        } else if (ok) {
+            printf("BAD super event count: %zu\n", ev.size());
+            ++fails;
+        }
+    }
+
     printf("MACRO fails=%d packets=%zu\n", fails, pkts.size());
     return 0;
 }
@@ -691,9 +711,11 @@ chk "--macro in --help"          "--macro NAME=SPEC"   "$($CTL --help 2>&1)"
 chk "--macro documents the name syntax" "quoted name" "$($CTL --help 2>&1)"
 chk "--macro rejects a bad repeat"  "not a repeat mode"  "$($CTL --macro side1='x: click left' 2>&1)"
 chk "--macro rejects a bad key"     "not a key or mouse" "$($CTL --macro side1='click nope' 2>&1)"
-# super is legal now that modifiers go out as ordinary keys (HID usage 0xe3);
-# getting as far as looking for the device is proof it passed validation.
-chk "--macro accepts super"         "Could not find"     "$($CTL --macro side1='down super' 2>&1)"
+# NOTE: do not assert acceptance by running the CLI here. A spec that passes
+# validation goes on to open the device and rewrite a real button, so the only
+# way such a check can "pass" is for no mouse to be attached — green in CI and
+# red on the maintainer's desk, having clobbered their side1 on the way. The
+# "super is accepted" assertions live in the compiled Macros harness above.
 chk "--macro rejects a bad button"  "unknown button"     "$($CTL --macro nope='click left' 2>&1)"
 chk "--macro needs NAME=SPEC"       "expects NAME=SPEC"  "$($CTL --macro side1 2>&1)"
 chk "a bad --macro never opens the device" "0" \

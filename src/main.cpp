@@ -1105,7 +1105,13 @@ int main(int argc, char* argv[]) {
                     uint8_t ep  = (listen_ep >= 0)
                                     ? static_cast<uint8_t>(listen_ep)
                                     : known_eps[i].addr;
-                    int bufsz   = (listen_ep >= 0) ? 64 : known_eps[i].maxpkt;
+                    // One endpoint packet per read, so each line is one report.
+                    // Asking for more lets libusb concatenate several into one
+                    // transfer, which then prints as a single oversized packet.
+                    int bufsz = (listen_ep >= 0) ? mouse.max_packet(ep)
+                                                 : known_eps[i].maxpkt;
+                    if (bufsz <= 0 || bufsz > static_cast<int>(sizeof(buf)))
+                        bufsz = static_cast<int>(sizeof(buf));
                     int got = mouse.try_recv(buf, bufsz, ep, 200);
                     if (got > 0) {
                         std::cout << "[pkt " << ++pkt_count << " | EP 0x"

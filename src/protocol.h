@@ -248,7 +248,23 @@ static constexpr uint16_t MACRO_REGION_SIZE   = 0x0180;
 static constexpr uint16_t MACRO_COUNT_OFFSET  = 0x001f;
 static constexpr uint16_t MACRO_EVENTS_OFFSET = 0x0020;
 static constexpr size_t   MACRO_EVENT_SIZE    = 5;
-static constexpr size_t   MACRO_MAX_EVENTS    = 70;
+
+// Derived, not chosen: the events start at MACRO_EVENTS_OFFSET and are
+// followed by one checksum byte, so this is simply how many fit in the region.
+// It works out to 70, which is also the cap the vendor UI enforces.
+//
+// Kept derived on purpose. build_macro_packets() indexes the region buffer
+// directly, so this value is what stands between a long macro and a write past
+// the end of it — exactly the bug class already fixed twice in this codebase
+// (see MAX_COMBO_TOKENS above, which is derived for the same reason). Hardcode
+// it and a later change to the offset or event size turns it into an overflow
+// with nothing to catch it.
+static constexpr size_t   MACRO_MAX_EVENTS =
+    (MACRO_REGION_SIZE - MACRO_EVENTS_OFFSET - 1) / MACRO_EVENT_SIZE;
+static_assert(MACRO_MAX_EVENTS == 70, "macro capacity changed unexpectedly");
+static_assert(MACRO_EVENTS_OFFSET + MACRO_MAX_EVENTS * MACRO_EVENT_SIZE
+                  < MACRO_REGION_SIZE,
+              "the checksum byte must still fit inside the region");
 
 // The vendor encoder clamps every delay up to this, which is why its decoder
 // reads a stored 3 back as "no delay": 3 ms is the floor the firmware honours.
