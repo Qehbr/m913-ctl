@@ -25,6 +25,10 @@ The Compx revision differs in a few ways — see [Compx hardware notes](#compx-h
 - **LED** — Areson: off/steady/respiration/rainbow modes; Compx: per-DPI-stage RGB color
 - **Polling rate** — 125, 250, 500, or 1000 Hz
 - **Config files** — INI format for saving and sharing configurations
+- **Read-back** — `--save` decodes the mouse's stored configuration into an INI
+  file you can edit and re-apply (Areson)
+- **Macros** — up to 70 events per button, with per-event delays and a hardware
+  repeat-while-held mode (Areson)
 
 ## GUI
 
@@ -93,8 +97,8 @@ m913-ctl --button side1=ctrl+1 --button side4=ctrl+4
 m913-ctl --dpi 1=800 --dpi 2=1600 --dpi 3=3200
 
 # Set LED
-m913-ctl --led steady
-m913-ctl --led respiration
+m913-ctl --led steady --led-color ff0000 --led-brightness 200
+m913-ctl --led respiration --led-speed 4
 m913-ctl --led rainbow
 m913-ctl --led off
 
@@ -104,16 +108,35 @@ m913-ctl --polling-rate 1000
 # Apply config file
 m913-ctl --config examples/example.ini
 
+# Read the mouse's current configuration back as an INI file
+m913-ctl --save my-setup.ini
+m913-ctl --save > my-setup.ini      # or to stdout
+
+# Config file plus overrides — the flags win, and it is all sent as one write
+m913-ctl --config my-setup.ini --dpi 1=1600 --led off
+
 # List all valid action names
 m913-ctl --list-actions
 ```
 
-> **Note:** Each invocation sends a complete button mapping to the mouse — buttons not mentioned are reset to their defaults. To remap multiple buttons, pass all `--button` flags in a single command. For a full persistent setup, use a config file.
+> **Note:** `--button` and `--dpi` each write a **complete block**. Any button
+> or DPI slot you do not mention is reset to its factory default — the mouse
+> stores all 16 buttons as one block and all 5 DPI slots as another, and there
+> is no way to change one entry in isolation. So pass everything you want in a
+> single command, or keep it in a config file. `--save` writes one out for you.
 
-> **`(no ACK within 1.5s)`?** The acknowledgement comes from the mouse itself over
-> the wireless link, and an idle mouse throttles its radio, so replies often
-> arrive too late. The settings still apply. Keep the mouse moving while the
-> command runs and the ACKs come back.
+> **Note:** A config file and inline flags can be combined. They are merged
+> into one configuration and written once, with the flags overriding the file
+> — so `--config my.ini --dpi 1=1600` keeps everything in the file and changes
+> only DPI slot 1.
+
+> **`(NOT acknowledged ...)`?** That packet did not land. The acknowledgement
+> comes from the mouse itself over the wireless link, not from the receiver, and
+> an idle mouse stops answering within seconds. Each packet is re-sent up to six
+> times, and anything still unanswered is counted and reported at the end, with
+> a non-zero exit status — so a partial write cannot pass for a complete one.
+> Keep the mouse moving while the command runs, or use the cable. Macros are the
+> most affected: a half-written macro does nothing at all.
 
 ### Config file
 
@@ -147,6 +170,33 @@ button_side4=www_back
 
 See [examples/example.ini](examples/example.ini) for a complete example.
 
+### Reading your configuration back
+
+`--save` reads the configuration out of the mouse and writes it as an INI file
+that `--config` accepts:
+
+```bash
+m913-ctl --save my-setup.ini
+```
+
+This is the way to take over a setup made with the vendor software on Windows,
+or to recover one you no longer have the file for. All 16 buttons, the 5 DPI
+slots, the active stage count, the LED state and the polling rate come back.
+
+- **Areson only.** The Compx revision answers a different report type at
+  addresses that have never been captured, so there is nothing reliable to
+  decode there; `--save` refuses rather than guess, and `--get` shows the raw
+  replies. Fixing that needs USB captures of the Windows software talking to a
+  Compx device.
+- **Keep the mouse moving while it runs.** The replies come from the mouse
+  itself over the 2.4 GHz link, not from the receiver, so an idle wireless
+  mouse answers late. Each block gets a second attempt, and anything that never
+  answers is reported both on stderr and as a comment in the file.
+- A binding the decoder cannot name is written as a commented-out line with its
+  raw bytes, so the file stays applicable and still records what was there.
+  That is worth reporting as a bug — it means an action the mouse stores has no
+  name in this tool.
+
 ## Button names
 
 | Name | Physical button |
@@ -176,7 +226,9 @@ left clicks.
 - `fire` — default burst (speed 58, 3 clicks)
 - `fire:speed:times` — `speed` 3–255 (lower = faster), `times` = clicks per press, **0–3**
 
-> **This is not an autoclicker.** `times` is a fixed number of clicks per press,
+> **This is not an autoclicker** — [macros](#macros) are, via
+> `hold: click left 20`, which repeats for as long as the button is held.
+> `times` is a fixed number of clicks per press,
 > not a repeat-while-held mode, and **3 is a hardware ceiling**, not a
 > conservative choice. Measured on `25a7:fa07`:
 >
@@ -219,6 +271,77 @@ is rejected with an error.
 - Multi-key: `a+b`, `a+b+c`
 - Modifiers: `ctrl`, `shift`, `alt`, `super` (or `ctrl_l`, `ctrl_r`, `shift_l`, etc.)
 
+## Macros
+
+The macro encoding was recovered by static analysis of the vendor software and
+then confirmed on a real mouse — autoclicker, modified keystrokes, per-event
+delays and all three repeat modes. The byte format is documented in the comment
+above `MACRO_BASE` in `src/protocol.h`. **Areson only**: the Compx revision uses
+different addressing that has never been captured.
+
+Each button has its own macro — the mouse stores one 384-byte macro region per
+button, and there is no shared pool of numbered macro slots. Defining a macro
+for a button therefore also binds that button to it.
+
+```ini
+[macros]
+side1 = hold: click left 20
+side2 = 3: down ctrl, click c 50, up ctrl
+side3 = click a 100, click b 100, click c 100
+```
+
+Or on the command line:
+
+```bash
+m913-ctl --macro side1="hold: click left 20"
+```
+
+A spec is `["name"] [repeat:] step[, step ...]`.
+
+| Repeat | Meaning |
+|---|---|
+| *omitted* | run the macro once |
+| `1`–`253` | run it that many times |
+| `hold` | **repeat while the button is held** |
+| `toggle` | repeat until any key is pressed |
+
+The optional **name** is what the vendor Windows software lists the macro
+under, so `"Auto Click" hold: click left 20` shows up as `Auto Click` in its
+macro list. Up to 15 characters; it is cosmetic and the mouse ignores it.
+
+A step is `click|down|up NAME [DELAY_MS]`:
+
+- `click` presses and releases; `down` and `up` do one or the other, so a macro
+  can hold a modifier across several keys.
+- `NAME` resolves exactly as a button action does — mouse buttons first, then
+  modifiers, then keys. So `left` is the **mouse button** and `arrow_left` is
+  the arrow key. Mouse buttons: `left`, `right`, `middle`, `back`, `forward`.
+- `DELAY_MS` is the pause stored on each event the step generates, 0–65535.
+  The firmware's floor is 3 ms and anything lower is stored as 3.
+
+Limits, all taken from the vendor software's own constants:
+
+- **70 events** per macro, and a `click` counts as two.
+- Repeat counts stop at 253; 254 and 255 are the two loop modes.
+- `hold` is the vendor software's "Cycle Until the Key Released", and `toggle`
+  is its "Cycle Until any key pressed".
+- Modifiers are sent as ordinary keys rather than as modifier events. Both
+  encodings work for a short macro, but a modifier event silently kills any
+  macro longer than about ten events — so the tool always uses the form that
+  does not. `super` works as a result, which the other encoding cannot express.
+
+`hold: click left 20` is the autoclicker the fire button cannot do: `fire` is a
+fixed burst of at most three clicks, while a held macro repeats indefinitely.
+
+See [examples/example_macros.ini](examples/example_macros.ini) for a complete
+example, including an autoclicker and a held-modifier sequence.
+
+> **Keep the mouse moving, or use the cable.** A macro is only a handful of
+> packets, but an idle 2.4 GHz mouse stops answering within seconds and a write
+> that gets no acknowledgement has not been applied — the region then holds a
+> half-written macro, which simply does nothing. If a macro does not fire, apply
+> it again with the mouse in use.
+
 ## LED settings
 
 These apply to the **original (Areson)** hardware. For the Compx revision, see below.
@@ -229,6 +352,9 @@ These apply to the **original (Areson)** hardware. For the Compx revision, see b
 | `color` | Hex RGB (`ff0000` = red) | steady, respiration |
 | `brightness` | 0–255 (10 hardware levels) | steady |
 | `speed` | 1–5 (1=slowest, 5=fastest) | respiration |
+
+Each has a command-line equivalent: `--led`, `--led-color`, `--led-brightness`,
+`--led-speed`.
 
 ## Compx hardware notes
 
@@ -263,7 +389,13 @@ m913-ctl --listen          # listen on both endpoints (Ctrl+C to stop)
 m913-ctl --listen 0x82     # listen on one endpoint only
 m913-ctl --probe-commands  # probe which command bytes the device answers
 m913-ctl --raw-send HEX    # send raw packet for debugging
+m913-ctl --get             # raw form of --save: print replies as hex
+m913-ctl --get 12          # read one block (0-68)
 ```
+
+`--get` is `--save` without the decoding, for protocol work. It also walks the
+16 regions of 384 bytes at `0x0301`+ that `--save` skips: they read as erased
+flash and nothing is known to live there.
 
 ## Development
 
@@ -283,9 +415,37 @@ python3 tests/verify-hardware.py
 ```
 
 Both **rewrite the mouse's stored configuration** and restore
-`examples/example.ini` at the end. See [docs/TESTING.md](docs/TESTING.md) for
-what they cover, how to read the report dumps, and how to recover a mouse whose
-kernel driver was left detached.
+`examples/example.ini` at the end — run `m913-ctl --save before.ini` first if
+the mouse holds a setup you care about. See [docs/TESTING.md](docs/TESTING.md)
+for what they cover, how to read the report dumps, and how to recover a mouse
+whose kernel driver was left detached.
+
+### Macros: not supported yet
+
+The mouse has 16 regions of 384 bytes at `0x0301` that read as erased flash, and
+the vendor software can program macros, but neither the storage format nor the
+button action code that points at a macro is known. Both have to come from USB
+captures of the Windows software.
+
+If you have a Windows machine with the vendor software and can record USB
+traffic (USBPcap + Wireshark) while it programs a macro, that would unblock the
+feature — please open an issue. The two captures that matter most are the same
+button assigned to a plain key and then to a macro, which isolates the action
+code, and a macro of three left clicks, which shows the storage format.
+
+[tools/decode-capture.py](tools/decode-capture.py) does the analysis, and is
+useful for any protocol work here: it decodes a capture — or a `--get` dump —
+into addressed, checksum-verified writes, names the memory region each one
+lands in, and `--diff` shows which bytes two sessions differ by, which is how
+an unknown field gets isolated.
+
+```bash
+python3 tools/decode-capture.py --diff before.pcapng after.pcapng
+
+m913-ctl --get > before.txt      # or diff memory read off the mouse
+m913-ctl --get > after.txt
+python3 tools/decode-capture.py --diff before.txt after.txt
+```
 
 ## Acknowledgments
 

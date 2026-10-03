@@ -161,14 +161,23 @@ def main():
 
     header("PHASE 1  Apply config")
     rc, out = run(["--config", TEST_INI])
+    npkt = len(re.findall(r"^\s+--> ", out, re.M))
+    noack = out.count("NOT acknowledged")
+    # An unacknowledged packet did not land, so the bindings the phases below
+    # are about to test may not be on the mouse. Carrying on would report
+    # failures against a config that was never fully written, so stop -- but
+    # say which of the two it was, because the fix differs.
+    if noack:
+        record("apply", "config applied", False,
+               f"{noack} of {npkt} packets unacknowledged")
+        print(f"\n{R}Stopping: the mouse did not take the whole config.{X}")
+        print("  An idle 2.4GHz mouse stops answering. Keep it moving, or use")
+        print("  the cable, and run this again.")
+        sys.exit(1)
     if rc != 0:
         record("apply", "config applied", False, out.strip().splitlines()[-1])
         print(f"\n{R}Stopping.{X}"); sys.exit(1)
-    npkt = len(re.findall(r"^\s+--> ", out, re.M))
-    noack = out.count("no ACK")
-    record("apply", "config applied", True, f"{npkt} packets")
-    record("apply", "every packet ACKed", noack == 0,
-           "all ACKed" if noack == 0 else f"{noack} without ACK (wireless latency)")
+    record("apply", "config applied", True, f"{npkt} packets, all acknowledged")
 
     header("PHASE 2  LED (visual)")
     print("  Config set LED = steady red. The colour line in the .ini has an")

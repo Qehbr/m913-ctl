@@ -39,6 +39,7 @@ add_executable(m913-ctl
     src/protocol.cpp
     src/data.cpp
     src/config.cpp
+    src/readback.cpp
 )
 
 target_compile_definitions(m913-ctl PRIVATE APP_VERSION="${APP_VERSION}")

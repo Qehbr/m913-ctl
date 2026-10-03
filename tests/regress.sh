@@ -29,6 +29,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 INC="-I $REPO/src $(pkg-config --cflags libusb-1.0 2>/dev/null)"
 SRC="$REPO/src/protocol.cpp $REPO/src/data.cpp"
+# Everything except main.cpp and usb.cpp, i.e. the whole write and read path
+# with no I/O in it. readback.cpp needs libusb's header for UsbMouse but not
+# the library, since the harnesses below never open a device.
+SRC_ALL="$SRC $REPO/src/config.cpp $REPO/src/readback.cpp"
 
 pass=0; fail=0; skip=0
 ok(){   printf "  \033[32mPASS\033[0m  %s\n" "$1"; pass=$((pass+1)); }
@@ -129,6 +133,43 @@ chk "enable-only config still emits the stage packet"       "ENABLEONLY 1" "$OUT
 chk "colour builder honours DPI_SLOTS"                      "COLOR 5"      "$OUT"
 chk "DPI_SLOTS == 5"                                        "SLOTS 5"      "$OUT"
 
+hdr "Compx write path (config → sequences)"
+# build_config_sequences() decides what a Config turns into for both hardware
+# revisions. The Compx half cannot be checked by the round-trip below — there
+# is no read-back for it — so its shape is asserted directly here: which
+# sequences get sent, and how many packets each carries.
+cat > "$TMP/compxseq.cpp" <<'EOF'
+#include "config.h"
+#include <cstdio>
+static void show(const char* tag, const Config& c) {
+    printf("%s:", tag);
+    for (auto& s : build_config_sequences(c, COMPX_LAYOUT, true))
+        printf(" %s=%zu", s.label.c_str(), s.packets.size());
+    printf("\n");
+}
+int main() {
+    Config a;                       // --led off only: colours every stage
+    a.led.set = true; a.led.mode = LedMode::Off;
+    show("LEDONLY", a);
+
+    Config b;                       // dpi2_enable=0 with no values at all
+    b.dpi[1].enabled = false;
+    show("ENABLEONLY", b);
+
+    Config c;                       // values + per-stage colours, 3 stages
+    for (int i = 0; i < DPI_SLOTS; ++i) { c.dpi[i].value = 800; c.dpi[i].color = 0x10203040 & 0xFFFFFF; }
+    c.dpi[3].enabled = false;
+    show("FULL", c);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/compxseq.cpp" $SRC_ALL -o "$TMP/compxseq" 2>/dev/null
+CS="$("$TMP/compxseq")"
+chk "--led off alone colours all 5 stages"        "LEDONLY: LED color=5"          "$CS"
+chk "an enable-only config sends just the stage packet" "ENABLEONLY: DPI config=1" "$CS"
+chk "values+colours: 5 DPI + stage packet, 3 active stages coloured" \
+    "FULL: DPI config=6 LED color=3" "$CS"
+
 hdr "DPI validation is per-revision"
 cat > "$TMP/dpi.cpp" <<'EOF'
 #include "protocol.h"
@@ -197,10 +238,503 @@ chk "times=3 passes through unchanged"            "fire:58:3=043a0314" "$FV"
 chk "times=4 refused (hardware fires nothing)"    "fire:58:4=REJECT"   "$FV"
 chk "times=50 refused (stored but never fires)"   "fire:58:50=REJECT"  "$FV"
 
+hdr "Action name round-trip (every name --save could emit)"
+# --save turns stored bytes back into names, and those names have to parse to
+# the bytes they came from or a saved config silently differs from the mouse.
+# The risk is aliases: several names share one encoding ("none"/"disable",
+# "left" as a mouse button AND as an arrow keycode), so the reverse direction
+# has to pick one spelling per encoding. This walks every name in the tables.
+cat > "$TMP/names.cpp" <<'EOF'
+#include "protocol.h"
+#include "data.h"
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <string>
+
+// Simulated device memory: apply a write packet the way the mouse would.
+static uint8_t mem[0x400];
+static void apply_packet(const Packet& p) {
+    if (p[1] != 0x07) return;
+    unsigned addr = (unsigned)((p[3] << 8) | p[4]), len = p[5];
+    for (unsigned i = 0; i < len && addr + i < sizeof(mem); ++i)
+        mem[addr + i] = p[6 + i];
+}
+
+int main() {
+    int checked = 0, bad = 0;
+    for (const std::string& name : all_parseable_action_names()) {
+        ActionBytes want;
+        if (!parse_action(name, want)) { printf("PARSEFAIL %s\n", name.c_str()); ++bad; continue; }
+
+        std::string spelled;
+        if (want[0] == 0x90 || want[0] == 0x92) {
+            // Keyboard and consumer bindings live in the button's event list,
+            // so go through the packets to get the bytes the mouse stores.
+            memset(mem, 0xFF, sizeof mem);
+            std::map<uint8_t, ActionBytes> m; m[0] = want;
+            if (want[0] == 0x90 && want[3] > 1) register_multikey_action(0, name);
+            for (const Packet& p : build_button_mapping(m, nullptr)) apply_packet(p);
+            spelled = decode_key_event_list(&mem[0x0100], 20);
+        } else {
+            spelled = action_name(want);
+        }
+
+        ++checked;
+        ActionBytes back;
+        if (spelled.empty() || !parse_action(spelled, back) || back != want) {
+            printf("MISMATCH '%s' -> '%s'\n", name.c_str(), spelled.c_str());
+            ++bad;
+        }
+    }
+    printf("NAMES checked=%d bad=%d\n", checked, bad);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/names.cpp" $SRC_ALL -o "$TMP/names" 2>/dev/null
+NM="$("$TMP/names" 2>&1)"
+chk "every action name survives bytes → name → bytes" "bad=0" "$NM"
+# Guard against the harness silently walking an empty table.
+NCHECKED="$(sed -n 's/.*checked=\([0-9]*\).*/\1/p' <<<"$NM")"
+if [[ -n "$NCHECKED" && "$NCHECKED" -gt 100 ]]; then
+  ok "the whole table was walked ($NCHECKED names)"
+else
+  no "suspiciously few names checked — $NM"
+fi
+
+hdr "Config round-trip (write path → device image → read path)"
+# The strongest offline check there is: build the packets a Config would be
+# written as, apply them to a simulated device memory, read that memory back
+# through the same addresses M913_READ_CODES asks for, decode it, and require
+# the result to match what went in. It covers both halves at once — a wrong
+# address or a misread field on either side breaks it — and it is what makes
+# --save trustworthy without a mouse to hand.
+cat > "$TMP/rt.cpp" <<'EOF'
+#include "config.h"
+#include "readback.h"
+#include "data.h"
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <string>
+
+static uint8_t mem[0x400];
+static void apply_packet(const Packet& p) {
+    if (p[1] != 0x07) return;
+    unsigned addr = (unsigned)((p[3] << 8) | p[4]), len = p[5];
+    for (unsigned i = 0; i < len && addr + i < sizeof(mem); ++i)
+        mem[addr + i] = p[6 + i];
+}
+// Read the image back exactly where the real read codes point, so a decoder
+// that wants an address nobody asks for fails here rather than on hardware.
+static BlockMap to_blocks() {
+    BlockMap b;
+    for (const Packet* req : config_read_requests()) {
+        uint16_t addr = request_address(*req);
+        std::array<uint8_t, READ_CHUNK> c{};
+        for (size_t i = 0; i < READ_CHUNK; ++i)
+            c[i] = (addr + i < sizeof(mem)) ? mem[addr + i] : 0xFF;
+        b[addr] = c;
+    }
+    return b;
+}
+
+static int fails = 0;
+static void eq(const char* what, long a, long b) {
+    if (a != b) { printf("BAD %s: %ld != %ld\n", what, a, b); ++fails; }
+}
+// Buttons are compared as BYTES, not spellings: "three_click" and "fire:50:3"
+// are the same four bytes, and the arrow keys come back as arrow_*.
+static void eq_button(const char* tag, const Config& a, const Config& b,
+                      const std::string& key) {
+    ActionBytes wa{}, wb{};
+    auto ia = a.buttons.find(key), ib = b.buttons.find(key);
+    if (ia == a.buttons.end() || ib == b.buttons.end() ||
+        !parse_action(ia->second, wa) || !parse_action(ib->second, wb) || wa != wb) {
+        printf("BAD %s %s: '%s' -> '%s'\n", tag, key.c_str(),
+               ia == a.buttons.end() ? "" : ia->second.c_str(),
+               ib == b.buttons.end() ? "" : ib->second.c_str());
+        ++fails;
+    }
+}
+
+int main(int, char** argv) {
+    const char* ini_path = argv[1];
+
+    // One binding per branch of build_button_mapping(): direct mouse action,
+    // fire with parameters, plain key, modifier+key, multi-key, modifier
+    // only, two consumer keys, DPI controls, a special, and an arrow alias.
+    const char* actions[16] = {
+        "left", "right", "middle", "fire:25:2",
+        "f5", "ctrl+c", "a+b+c", "super",
+        "media_play", "media_vol_up", "dpi+", "dpi-cycle",
+        "led_toggle", "none", "arrow_left", "www_back",
+    };
+
+    Config in;
+    in.mouse.polling_rate = 500; in.mouse.set = true;
+    const uint16_t vals[DPI_SLOTS] = {400, 800, 1600, 3200, 6400};
+    for (int i = 0; i < DPI_SLOTS; ++i) in.dpi[i].value = vals[i];
+    in.dpi[3].enabled = false;            // stages cascade off from here
+    in.led.set = true; in.led.mode = LedMode::Respiration;
+    in.led.color = 0x123456; in.led.brightness = 200; in.led.speed = 4;
+    for (int i = 0; i < 16; ++i)
+        in.buttons[button_ini_name(button_ini_order()[i])] = actions[i];
+
+    memset(mem, 0xFF, sizeof mem);
+    for (auto& seq : build_config_sequences(in, nullptr, false))
+        for (const Packet& p : seq.packets) apply_packet(p);
+
+    Config out; DecodeReport rep;
+    if (!decode_device_config(to_blocks(), out, rep)) { printf("DECODEFAIL\n"); return 0; }
+
+    eq("polling", in.mouse.polling_rate, out.mouse.polling_rate);
+    for (int i = 0; i < DPI_SLOTS; ++i) eq("dpi", in.dpi[i].value, out.dpi[i].value);
+    // The device stores a stage COUNT, not a per-slot mask, so the cascade is
+    // the expected answer here, not the enabled[] that went in.
+    int want_stages = compx_active_dpi_stage_count(
+        {in.dpi[0].enabled, in.dpi[1].enabled, in.dpi[2].enabled,
+         in.dpi[3].enabled, in.dpi[4].enabled});
+    int got_stages = 0;
+    for (int i = 0; i < DPI_SLOTS; ++i) if (out.dpi[i].enabled) ++got_stages;
+    eq("stages", want_stages, got_stages);
+    eq("led mode",  (long)in.led.mode, (long)out.led.mode);
+    eq("led color", in.led.color, out.led.color);
+    eq("led brightness", in.led.brightness, out.led.brightness);
+    eq("led speed", in.led.speed, out.led.speed);
+    for (int i = 0; i < 16; ++i)
+        eq_button("button", in, out, button_ini_name(button_ini_order()[i]));
+
+    // And what --save would write has to parse back to the same thing.
+    { std::ofstream f(ini_path); f << config_to_ini(out, "round-trip test", rep.unnamed_buttons); }
+    Config re = parse_config_file(ini_path);
+    eq("ini polling", out.mouse.polling_rate, re.mouse.polling_rate);
+    eq("ini led mode", (long)out.led.mode, (long)re.led.mode);
+    eq("ini led color", out.led.color, re.led.color);
+    eq("ini led speed", out.led.speed, re.led.speed);
+    for (int i = 0; i < DPI_SLOTS; ++i) eq("ini dpi", out.dpi[i].value, re.dpi[i].value);
+    int re_stages = 0;
+    for (int i = 0; i < DPI_SLOTS; ++i) if (re.dpi[i].enabled) ++re_stages;
+    eq("ini stages", want_stages, re_stages);
+    for (int i = 0; i < 16; ++i)
+        eq_button("ini button", out, re, button_ini_name(button_ini_order()[i]));
+
+    printf("RT fails=%d warnings=%zu missing=%zu unnamed=%zu\n",
+           fails, rep.warnings.size(), rep.missing.size(), rep.unnamed_buttons.size());
+
+    // An erased device (every byte 0xFF) must decode to gaps, not to invented
+    // values, and must still produce an INI that parses.
+    memset(mem, 0xFF, sizeof mem);
+    Config e; DecodeReport erep;
+    decode_device_config(to_blocks(), e, erep);
+    { std::ofstream f(std::string(ini_path) + ".erased");
+      f << config_to_ini(e, "erased", erep.unnamed_buttons); }
+    bool ini_ok = true;
+    try { parse_config_file(std::string(ini_path) + ".erased"); }
+    catch (const std::exception&) { ini_ok = false; }
+    printf("ERASED buttons=%zu named=%zu iniparses=%d\n",
+           erep.unnamed_buttons.size(), e.buttons.size(), (int)ini_ok);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/rt.cpp" $SRC_ALL -o "$TMP/rt" 2>/dev/null
+RT="$("$TMP/rt" "$TMP/rt.ini" 2>&1)"
+chk "config survives write → device → read → INI → parse" "RT fails=0" "$RT"
+chk "nothing decoded with a warning"                      "warnings=0"  "$RT"
+chk "every address the decoder wants is actually read"    "missing=0"   "$RT"
+chk "all 16 buttons were named"                           "unnamed=0"   "$RT"
+chk "an erased device names no buttons"                   "ERASED buttons=16 named=0" "$RT"
+chk "an erased device still writes a parseable INI"       "iniparses=1" "$RT"
+
+hdr "Acknowledgement matching"
+# EP 0x82 carries HID input reports and the answers to earlier requests as well
+# as this one's. Taking whatever arrives next is how a dropped write was once
+# reported as successful, so the matcher has to be exact -- but not so exact
+# that it rejects a commit, whose reply carries status bytes instead of the
+# payload it was sent.
+cat > "$TMP/ack.cpp" <<'EOF'
+#include "readback.h"
+#include <cstdio>
+#include <cstring>
+
+static Packet mk(uint8_t sub, uint8_t hi, uint8_t lo) {
+    Packet p{};
+    p[0] = 0x08; p[1] = sub; p[3] = hi; p[4] = lo; p[5] = 0x0a;
+    p[16] = compute_checksum(p);
+    return p;
+}
+static void reply_to(const Packet& p, uint8_t* rx) {
+    for (int i = 0; i < 17; ++i) rx[i] = p[i];
+    rx[0] = 0x09;
+    rx[16] = static_cast<uint8_t>(p[16] - 1);
+}
+
+int main() {
+    int fails = 0;
+    Packet w1 = mk(0x07, 0x03, 0x00);     // write to the macro region
+    Packet w2 = mk(0x07, 0x03, 0x0a);     // the next chunk along
+    uint8_t rx[17];
+
+    reply_to(w1, rx);
+    if (!ack_matches(w1, rx)) { printf("BAD own ack rejected\n"); ++fails; }
+    // The exact failure seen on hardware: w1's late reply must not be taken
+    // for w2's, or a dropped w2 looks like a success.
+    if (ack_matches(w2, rx)) { printf("BAD stale ack accepted\n"); ++fails; }
+
+    // A HID input report sharing the endpoint.
+    memset(rx, 0, sizeof rx); rx[0] = 0x01; rx[1] = 0x02;
+    if (ack_matches(w1, rx)) { printf("BAD input report accepted\n"); ++fails; }
+
+    // A different sub-command at the same address (a read's reply answering a
+    // write, say) is not this packet's acknowledgement either.
+    Packet r1 = mk(0x08, 0x03, 0x00);
+    reply_to(r1, rx);
+    if (ack_matches(w1, rx)) { printf("BAD wrong sub-command accepted\n"); ++fails; }
+    if (!ack_matches(r1, rx)) { printf("BAD read ack rejected\n"); ++fails; }
+
+    // The commit: its reply does NOT echo the payload, so matching the whole
+    // packet would reject every commit a config session ends with.
+    Packet c{};
+    c[0] = 0x08; c[1] = 0x04; c[16] = compute_checksum(c);
+    uint8_t crx[17] = {0x09,0x04,0x00,0x00,0x00,0x02,0x03,0,0,0,0,0,0,0,0,0,0x43};
+    if (!ack_matches(c, crx)) { printf("BAD commit ack rejected\n"); ++fails; }
+
+    printf("ACK fails=%d\n", fails);
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/ack.cpp" $SRC_ALL -o "$TMP/ack" 2>/dev/null
+chk "an acknowledgement is matched to its own packet" "ACK fails=0" "$("$TMP/ack" 2>&1)"
+
+hdr "Macros"
+# The macro encoding came out of the vendor binaries and was then confirmed on
+# a real mouse; src/protocol.h carries the byte layout. Static analysis got three things wrong
+# — the press/release bits, the two loop modes, and the checksum's coverage —
+# and a fourth, modifiers, only testing could have found. These checks pin the
+# bytes to what the hardware established, so any future change to them is a
+# deliberate edit rather than a silent drift back.
+cat > "$TMP/macro.cpp" <<'EOF'
+#include "config.h"
+#include "data.h"
+#include <cstdio>
+#include <cstring>
+
+static int fails = 0;
+static void eq(const char* what, long a, long b) {
+    if (a != b) { printf("BAD %s: %ld != %ld\n", what, a, b); ++fails; }
+}
+
+int main() {
+    // ---- accepted and rejected specs ----
+    const char* good[] = {"click left", "hold: click left 20", "toggle: click a",
+                          "253: down ctrl, up ctrl", "up f5 65535",
+                          "down back, up forward", "hold: down super, up super"};
+    const char* bad[]  = {"", "bogus: click left", "click nosuchkey", "click",
+                          "sideways left", "254: click left", "0: click left",
+                          "click left -1", "click a,, up a", "click left 70000"};
+    for (auto s : good) {
+        uint8_t r; std::vector<MacroEvent> e; std::string err;
+        if (!parse_macro_spec(s, r, e, err)) { printf("REJECTED-GOOD '%s': %s\n", s, err.c_str()); ++fails; }
+    }
+    for (auto s : bad) {
+        uint8_t r; std::vector<MacroEvent> e; std::string err;
+        if (parse_macro_spec(s, r, e, err)) { printf("ACCEPTED-BAD '%s'\n", s); ++fails; }
+    }
+
+    // ---- the event cap: a click is two events ----
+    std::string c35, c36;
+    for (int i = 0; i < 35; ++i) c35 += (i ? ", " : "") + std::string("click left");
+    for (int i = 0; i < 36; ++i) c36 += (i ? ", " : "") + std::string("click left");
+    uint8_t r; std::vector<MacroEvent> e; std::string err;
+    if (!parse_macro_spec(c35, r, e, err)) { printf("BAD 70 events rejected\n"); ++fails; }
+    eq("70 events", (long)e.size(), 70);
+    if (parse_macro_spec(c36, r, e, err))  { printf("BAD 72 events accepted\n"); ++fails; }
+
+    // ---- the action bytes that bind a button to its macro ----
+    ActionBytes a = macro_action(0, MACRO_REPEAT_HOLD);
+    eq("action[0]", a[0], 0x06);
+    eq("action[1]", a[1], 0x00);
+    eq("action[2]", a[2], 0xfe);
+    eq("action[3]", a[3], (0x55 - 0x06 - 0x00 - 0xfe) & 0xFF);
+    if (!is_macro_action(a)) { printf("BAD is_macro_action\n"); ++fails; }
+    ActionBytes kb = KB_LIST_MARKER;
+    if (is_macro_action(kb)) { printf("BAD keyboard marker read as a macro\n"); ++fails; }
+    // The repeat byte rides in the action, so it must reach byte 2 verbatim.
+    eq("repeat toggle", macro_action(5, MACRO_REPEAT_TOGGLE)[2], 0xff);
+    eq("repeat count",  macro_action(5, 7)[2], 7);
+    eq("proto index",   macro_action(5, 7)[1], 5);
+
+    // ---- region layout ----
+    parse_macro_spec("hold: click left 20", r, e, err);
+    auto pkts = build_macro_packets(3, e);
+    uint8_t mem[0x180];
+    memset(mem, 0xAA, sizeof mem);          // 0xAA so gaps are visible
+    int covered = 0;
+    for (auto& p : pkts) {
+        eq("write sub-command", p[1], 0x07);
+        eq("chunk length", p[5] <= MACRO_CHUNK, 1);
+        unsigned addr = (unsigned)((p[3] << 8) | p[4]);
+        eq("in button 3's region", addr >= MACRO_BASE + 3 * MACRO_STRIDE &&
+                                   addr <  MACRO_BASE + 4 * MACRO_STRIDE, 1);
+        unsigned off = addr - (MACRO_BASE + 3 * MACRO_STRIDE);
+        for (unsigned k = 0; k < p[5]; ++k) { mem[off + k] = p[6 + k]; ++covered; }
+    }
+    // Only as far as the checksum is written, as the vendor tool does; the
+    // rest of the region is left alone. 2 events end at 0x2a, rounded to 0x2e.
+    eq("writes reach the checksum", covered >= 0x2b, 1);
+    eq("but not the whole region", covered < MACRO_REGION_SIZE, 1);
+    eq("event count byte", mem[MACRO_COUNT_OFFSET], 2);
+    eq("press event byte 0", mem[0x20], MACRO_PRESS_BITS | (int)MacroKind::Mouse);
+    eq("press code",         mem[0x21], 0x01);
+    eq("press pad",          mem[0x22], 0x00);
+    eq("delay high",         mem[0x23], 0x00);
+    eq("delay low",          mem[0x24], 20);
+    eq("release event byte 0", mem[0x25], MACRO_RELEASE_BITS | (int)MacroKind::Mouse);
+    // Checksum: (0x55 - sum of every byte before it) & 0xFF, stored right after
+    // the last event -- the same formula as every other block in this protocol.
+    unsigned sum = mem[MACRO_COUNT_OFFSET], end = 0x20 + 2 * MACRO_EVENT_SIZE;
+    for (unsigned i = MACRO_EVENTS_OFFSET; i < end; ++i) sum += mem[i];
+    eq("trailing checksum", mem[end], (0x55 - (sum & 0xFF)) & 0xFF);
+    // Padding between the checksum and the end of the last chunk is zeroed;
+    // past that the region is left as it was, which is what the vendor tool
+    // does rather than rewriting 384 bytes every time.
+    eq("byte after the checksum is zeroed", mem[end + 1], 0);
+
+    // Modifiers must go out as ordinary keys (HID usage 0xe0..0xe7), not as
+    // MacroKind::Modifier events: on hardware a modifier event silently kills
+    // any macro longer than about ten events, while the same macro with the
+    // modifier as a key runs fine. That ceiling is why parse_macro_spec()
+    // always emits modifiers as keys; see the note on it in data.cpp.
+    parse_macro_spec("down shift, up ctrl_r", r, e, err);
+    eq("modifier is sent as a key", (long)e[0].kind, (long)MacroKind::Key);
+    eq("left shift usage",          e[0].code, 0xe1);
+    eq("right ctrl usage",          e[1].code, 0xe4);
+    // And super is usable that way, which the modifier-bitmask form cannot do.
+    eq("super accepted", (long)parse_macro_spec("down super", r, e, err), 1L);
+    eq("super usage",    e[0].code, 0xe3);
+
+    // ---- delays are clamped up to the firmware floor ----
+    parse_macro_spec("click left 0", r, e, err);
+    auto p0 = build_macro_packets(0, e);
+    uint8_t m0[0x180] = {0};
+    for (auto& p : p0) {
+        unsigned addr = (unsigned)((p[3] << 8) | p[4]) - MACRO_BASE;
+        for (unsigned k = 0; k < p[5]; ++k) m0[addr + k] = p[6 + k];
+    }
+    eq("delay floor", m0[0x24], MACRO_MIN_DELAY_MS);
+
+    // ---- spec round-trip ----
+    const char* specs[] = {"click left", "hold: click left 20",
+                           "3: down ctrl, click c 50, up ctrl",
+                           "toggle: click arrow_left 100, up shift_r"};
+    for (auto s : specs) {
+        uint8_t r1, r2; std::vector<MacroEvent> e1, e2; std::string err1;
+        parse_macro_spec(s, r1, e1, err1);
+        std::string back = macro_spec_string(r1, e1);
+        if (!parse_macro_spec(back, r2, e2, err1) || r1 != r2 || e1.size() != e2.size()) {
+            printf("BAD respell '%s' -> '%s'\n", s, back.c_str()); ++fails; continue;
+        }
+        for (size_t i = 0; i < e1.size(); ++i)
+            if (e1[i].kind != e2[i].kind || e1[i].code != e2[i].code ||
+                e1[i].press != e2[i].press || e1[i].delay_ms != e2[i].delay_ms) {
+                printf("BAD respell event '%s' -> '%s'\n", s, back.c_str()); ++fails; break;
+            }
+    }
+
+    // ---- a macro in a Config produces the region write AND the binding ----
+    Config cfg;
+    cfg.macros["button_side1"] = "hold: click left 20";
+    validate_config(cfg, false);
+    auto seqs = build_config_sequences(cfg, nullptr, false);
+    bool saw_macro = false, saw_map = false;
+    for (auto& s : seqs) {
+        if (s.label.find("Macro") != std::string::npos) saw_macro = true;
+        if (s.label == "Button mapping") {
+            saw_map = true;
+            if (!saw_macro) { printf("BAD mapping sent before the macro data\n"); ++fails; }
+            // Side1 is protocol index 0 on Areson, so its action is in packet 0
+            // at bytes 6..9.
+            const Packet& p = s.packets.front();
+            eq("bound action[0]", p[6], 0x06);
+            eq("bound action[2]", p[8], 0xfe);
+        }
+    }
+    if (!saw_macro || !saw_map) { printf("BAD sequences: macro=%d map=%d\n", saw_macro, saw_map); ++fails; }
+
+    // ---- refusals ----
+    int threw = 0;
+    try { validate_config(cfg, true); } catch (const std::exception&) { threw = 1; }
+    eq("Compx refuses macros", threw, 1);
+    Config both;
+    both.macros["button_side1"]  = "click left";
+    both.buttons["button_side1"] = "f5";
+    threw = 0;
+    try { validate_config(both, false); } catch (const std::exception&) { threw = 1; }
+    eq("button in both sections refused", threw, 1);
+
+    // ---- modifiers are accepted, and go out as keys not as kind 0 ----
+    // This lives here rather than in the CLI section because the only way to
+    // prove acceptance through the CLI is to let the command reach the device,
+    // which both needs hardware absent to "pass" and rewrites a real button.
+    {
+        std::vector<MacroEvent> ev;
+        std::string err;
+        uint8_t rep = 0;
+        int ok = parse_macro_spec("down super", rep, ev, err) ? 1 : 0;
+        eq("super is accepted", ok, 1);
+        if (ok && ev.size() == 1) {
+            eq("super goes out as a key, not kind 0",
+               static_cast<int>(ev[0].kind), static_cast<int>(MacroKind::Key));
+            eq("super carries its HID usage", ev[0].code, 0xe3);
+        } else if (ok) {
+            printf("BAD super event count: %zu\n", ev.size());
+            ++fails;
+        }
+    }
+
+    printf("MACRO fails=%d packets=%zu\n", fails, pkts.size());
+    return 0;
+}
+EOF
+g++ -std=c++17 $INC "$TMP/macro.cpp" $SRC_ALL -o "$TMP/macro" 2>/dev/null
+MC="$("$TMP/macro" 2>&1)"
+chk "macro encoding matches the vendor analysis" "MACRO fails=0" "$MC"
+chk "a 2-event macro is 5 packets, not the whole region" "packets=5" "$MC"
+[[ "$MC" == *"MACRO fails=0"* ]] || printf "%s\n" "$MC" | head -20
+
 hdr "CLI surface"
 chk "--profile is gone"          "unrecognized option" "$($CTL --profile 2 2>&1)"
 chk "--probe-commands in --help" "--probe-commands"    "$($CTL --help 2>&1)"
 chk "--get in --help"            "--get"               "$($CTL --help 2>&1)"
+chk "--save in --help"           "--save"              "$($CTL --help 2>&1)"
+chk "--led-color in --help"      "--led-color"         "$($CTL --help 2>&1)"
+chk "--macro in --help"          "--macro NAME=SPEC"   "$($CTL --help 2>&1)"
+chk "--macro documents the name syntax" "quoted name" "$($CTL --help 2>&1)"
+chk "--macro rejects a bad repeat"  "not a repeat mode"  "$($CTL --macro side1='x: click left' 2>&1)"
+chk "--macro rejects a bad key"     "not a key or mouse" "$($CTL --macro side1='click nope' 2>&1)"
+# NOTE: do not assert acceptance by running the CLI here. A spec that passes
+# validation goes on to open the device and rewrite a real button, so the only
+# way such a check can "pass" is for no mouse to be attached — green in CI and
+# red on the maintainer's desk, having clobbered their side1 on the way. The
+# "super is accepted" assertions live in the compiled Macros harness above.
+chk "--macro rejects a bad button"  "unknown button"     "$($CTL --macro nope='click left' 2>&1)"
+chk "--macro needs NAME=SPEC"       "expects NAME=SPEC"  "$($CTL --macro side1 2>&1)"
+chk "a bad --macro never opens the device" "0" \
+    "$($CTL --macro side1='click nope' 2>&1 | grep -c Connected)"
+chk "whole-block writes documented in --help" "reset to its factory default" \
+    "$($CTL --help 2>&1)"
+
+# Every one of these is rejected during option parsing, before the device is
+# opened — the same reason the --get bound is checked there. A value that only
+# fails later could leave DPI or LED already written and the commit skipped.
+chk "--led rejects an unknown mode"      "unknown LED mode"    "$($CTL --led purple 2>&1)"
+chk "--led-color rejects non-hex"        "6 hex digits"        "$($CTL --led-color zzzzzz 2>&1)"
+chk "--led-color rejects short input"    "6 hex digits"        "$($CTL --led-color f00 2>&1)"
+chk "--led-brightness rejects 256"       "must be 0-255"       "$($CTL --led-brightness 256 2>&1)"
+chk "--led-speed rejects 0"              "must be 1-5"         "$($CTL --led-speed 0 2>&1)"
+for f in "--led purple" "--led-color zz" "--led-speed 9" "--led-brightness 999"; do
+  chk "bad $f never opens the device" "0" "$($CTL $f 2>&1 | grep -c Connected)"
+done
 
 # --get indexes M913_READ_CODES directly, so an unbounded index would read past
 # the table and transmit whatever followed it. The bound is checked during
@@ -246,28 +780,80 @@ else
   chk "the next run reattaches interface 0" "usbhid" "$(drv 0)"
   chk "the next run reattaches interface 1" "usbhid" "$(drv 1)"
 
+  hdr "Configuration read-back (--save, needs the device)"
+  # The offline round-trip proves the decoder agrees with the packet builders.
+  # What it cannot prove is that the ADDRESSES are right: those came from one
+  # captured vendor session, so the only real check is to write a known config
+  # and read it back off the mouse.
+  VID="$(cat "/sys/bus/usb/devices/${USBDEV}/idVendor" 2>/dev/null || echo '')"
+  if [[ "$VID" == "3554" ]]; then
+    chk "--save refuses Compx rather than guessing" "Areson layout only" \
+        "$($CTL --save 2>&1)"
+  else
+    printf '[mouse]\npolling_rate=500\n[dpi]\ndpi1=800\ndpi2=1600\ndpi3=3200\n' \
+           > "$TMP/known.ini"
+    printf '[led]\nmode=steady\ncolor=ff0000\nbrightness=200\n'              >> "$TMP/known.ini"
+    printf '[buttons]\nbutton_side1=f5\nbutton_side2=ctrl+c\nbutton_side3=a+b+c\n' \
+           >> "$TMP/known.ini"
+    printf 'button_side4=media_play\nbutton_fire=fire:25:2\n'                >> "$TMP/known.ini"
+    $CTL --config "$TMP/known.ini" >/dev/null 2>&1
+    sleep 2
+
+    # INI on stdout, progress on stderr — that split is what makes this work.
+    SAVED="$($CTL --save 2>/dev/null)"
+    if [[ -z "$SAVED" || "$SAVED" == *INCOMPLETE* ]]; then
+      # Same reason the ACK count is reported rather than asserted: the replies
+      # come from the mouse, and an idle 2.4G mouse answers late or not at all.
+      printf "  \033[33mINFO\033[0m  %s\n" \
+        "--save came back empty or incomplete — normal for an idle wireless mouse, move it and re-run"
+    else
+      chk "polling rate read back"      "polling_rate=500"     "$SAVED"
+      chk "dpi1 read back"              "dpi1=800"             "$SAVED"
+      chk "dpi3 read back"              "dpi3=3200"            "$SAVED"
+      chk "LED mode read back"          "mode=steady"          "$SAVED"
+      chk "LED colour read back"        "color=ff0000"         "$SAVED"
+      chk "LED brightness read back"    "brightness=200"       "$SAVED"
+      chk "plain key read back"         "button_side1=f5"      "$SAVED"
+      chk "combo read back"             "button_side2=ctrl+c"  "$SAVED"
+      chk "multi-key read back"         "button_side3=a+b+c"   "$SAVED"
+      chk "multimedia read back"        "button_side4=media_play" "$SAVED"
+      chk "fire parameters read back"   "button_fire=fire:25:2"   "$SAVED"
+      chk "no undecodable bindings"     "0" "$(grep -c '^; button' <<<"$SAVED")"
+      printf '%s' "$SAVED" > "$TMP/saved.ini"
+      if $CTL --config "$TMP/saved.ini" >/dev/null 2>&1; then
+        ok "--save output re-applies with --config"
+      else
+        no "--save output was rejected by --config"
+      fi
+    fi
+  fi
+
   hdr "End-to-end"
   # The wireless link needs a moment after the claim/kill churn above,
   # otherwise ACKs time out and the counts below read as failures.
   sleep 3
   if [[ -f "$RESTORE_INI" ]]; then
     OUT="$($CTL --config "$RESTORE_INI" 2>&1)"; RC=$?
-    chk "config applies" "0" "$RC"
     N="$(grep -c '^\s*-->' <<<"$OUT")"
     [[ "$N" -gt 0 ]] && ok "packets sent ($N)" || no "no packets sent"
 
-    # ACKs are generated by the MOUSE, not the receiver, and a 2.4G mouse that
-    # is sitting still answers slowly or not at all within the 1.5 s window.
-    # That is expected and send_cmd() warns and continues, so this is reported
-    # rather than asserted -- otherwise the result depends on whether someone
-    # happened to be moving the mouse.
-    A="$(grep -c 'no ACK' <<<"$OUT")"
+    # An unacknowledged packet did not land, so the tool now exits non-zero and
+    # says so. Whether that happens depends on whether the mouse was in use, so
+    # it is reported rather than asserted -- but the exit status and the message
+    # have to agree with each other, and that IS asserted.
+    A="$(grep -c 'NOT acknowledged' <<<"$OUT")"
     if [[ "$A" == "0" ]]; then
-      ok "every packet ACKed ($N/$N)"
+      ok "every packet acknowledged ($N/$N)"
+      chk "a fully applied config exits 0" "0" "$RC"
     else
       printf "  \033[33mINFO\033[0m  %s\n" \
-        "$A/$N packets went unACKed — normal for an idle wireless mouse, move it to get ACKs"
+        "$A/$N packets went unacknowledged — normal for an idle wireless mouse, keep it moving"
+      [[ "$RC" != "0" ]] && ok "an incomplete write exits non-zero" \
+                         || no "packets were lost but the run exited 0"
+      chk "and says the config is incomplete" "incomplete" "$OUT"
     fi
+    # Re-send with the mouse hopefully awake, so the restore below is complete.
+    [[ "$A" == "0" ]] || $CTL --config "$RESTORE_INI" >/dev/null 2>&1
     $CTL --config "$RESTORE_INI" >/dev/null 2>&1   # leave the mouse as found
   else
     sk "RESTORE_INI not found at $RESTORE_INI"
