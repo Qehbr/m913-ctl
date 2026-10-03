@@ -48,10 +48,19 @@ void UsbMouse::open_all_interfaces(uint16_t vid, uint16_t pid) {
     }
 
     // Discover how many interfaces the device has, then claim all of them.
+    // While the descriptor is open, record every IN endpoint's packet size —
+    // try_recv() needs it to size its reads legally (see the note there).
     libusb_device* dev = libusb_get_device(_handle);
     libusb_config_descriptor* cfg = nullptr;
     if (libusb_get_active_config_descriptor(dev, &cfg) == 0) {
         _num_interfaces = cfg->bNumInterfaces;
+        for (int i = 0; i < cfg->bNumInterfaces; ++i)
+            for (int a = 0; a < cfg->interface[i].num_altsetting; ++a) {
+                const auto& alt = cfg->interface[i].altsetting[a];
+                for (int e = 0; e < alt.bNumEndpoints; ++e)
+                    _max_packet[alt.endpoint[e].bEndpointAddress] =
+                        alt.endpoint[e].wMaxPacketSize;
+            }
         libusb_free_config_descriptor(cfg);
     }
 
@@ -102,6 +111,29 @@ void UsbMouse::send(const uint8_t data[M913_PACKET_SIZE]) {
 
 int UsbMouse::try_recv(uint8_t* buf, int buf_size, uint8_t endpoint,
                        unsigned int timeout_ms) {
+    // An interrupt read's length must be an exact multiple of the endpoint's
+    // wMaxPacketSize, or the transfer fails with LIBUSB_ERROR_OVERFLOW the
+    // moment the device actually sends something.
+    //
+    // This is not a guess. Measured on 25a7:fa07 against EP 0x81, whose
+    // wMaxPacketSize is 7: sizes 7, 14, 21, 28, 63 and 70 all read a packet,
+    // while 8, 13, 16, 17, 64 and 128 all threw. The failure is invisible
+    // until traffic arrives, which is why a too-large buffer looks fine on an
+    // idle device and then breaks the moment the mouse is moved.
+    //
+    // So the request is rounded DOWN to whole packets here rather than left to
+    // each caller. A plain `uint8_t buf[64]` is the natural thing to write and
+    // is wrong on both of this device's endpoints (64 divides neither 7 nor
+    // 17); rounding centrally means no call site has to know that. Only
+    // buf_size bytes are ever touched, so this can only ever read less.
+    if (buf_size > 0) {
+        auto it = _max_packet.find(endpoint);
+        if (it != _max_packet.end() && it->second > 0) {
+            int whole = (buf_size / it->second) * it->second;
+            if (whole > 0) buf_size = whole;
+        }
+    }
+
     int transferred = 0;
     int r = libusb_interrupt_transfer(
         _handle,
