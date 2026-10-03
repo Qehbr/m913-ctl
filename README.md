@@ -275,10 +275,9 @@ is rejected with an error.
 
 The macro encoding was recovered by static analysis of the vendor software and
 then confirmed on a real mouse — autoclicker, modified keystrokes, per-event
-delays and all three repeat modes. See
-[docs/MACRO-PROTOCOL.md](docs/MACRO-PROTOCOL.md) for the full format, including
-the three things static analysis got wrong. **Areson only**: the Compx revision
-uses different addressing that has never been captured.
+delays and all three repeat modes. The byte format is documented in the comment
+above `MACRO_BASE` in `src/protocol.h`. **Areson only**: the Compx revision uses
+different addressing that has never been captured.
 
 Each button has its own macro — the mouse stores one 384-byte macro region per
 button, and there is no shared pool of numbered macro slots. Defining a macro

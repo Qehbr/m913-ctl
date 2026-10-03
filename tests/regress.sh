@@ -508,7 +508,7 @@ chk "an acknowledgement is matched to its own packet" "ACK fails=0" "$("$TMP/ack
 
 hdr "Macros"
 # The macro encoding came out of the vendor binaries and was then confirmed on
-# a real mouse (docs/MACRO-PROTOCOL.md). Static analysis got three things wrong
+# a real mouse; src/protocol.h carries the byte layout. Static analysis got three things wrong
 # — the press/release bits, the two loop modes, and the checksum's coverage —
 # and a fourth, modifiers, only testing could have found. These checks pin the
 # bytes to what the hardware established, so any future change to them is a
@@ -603,7 +603,8 @@ int main() {
     // Modifiers must go out as ordinary keys (HID usage 0xe0..0xe7), not as
     // MacroKind::Modifier events: on hardware a modifier event silently kills
     // any macro longer than about ten events, while the same macro with the
-    // modifier as a key runs fine. See docs/MACRO-PROTOCOL.md.
+    // modifier as a key runs fine. That ceiling is why parse_macro_spec()
+    // always emits modifiers as keys; see the note on it in data.cpp.
     parse_macro_spec("down shift, up ctrl_r", r, e, err);
     eq("modifier is sent as a key", (long)e[0].kind, (long)MacroKind::Key);
     eq("left shift usage",          e[0].code, 0xe1);

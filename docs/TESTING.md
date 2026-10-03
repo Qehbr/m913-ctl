@@ -59,7 +59,7 @@ small harnesses against the real sources and checks behaviour directly:
   trustworthy without a mouse to hand. It also checks that an erased
   (all-`0xFF`) device decodes to reported gaps rather than invented values.
 - **Macros.** The encoding was recovered from the vendor software and then
-  confirmed on a real mouse ([MACRO-PROTOCOL.md](MACRO-PROTOCOL.md)), and the
+  confirmed on a real mouse, and the
   suite pins the bytes to what that testing established: the count at offset
   `0x1f`, five-byte events from `0x20`, `0x80`/`0x40` for press/release, the
   3 ms delay floor, the trailing checksum over count-plus-events, the 70-event

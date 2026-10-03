@@ -220,9 +220,13 @@ std::vector<Packet> build_compx_color_packets(const uint32_t colors[DPI_SLOTS], 
 // macro slots and nothing numbers them. A button's action bytes say "run the
 // macro", and the mouse reads the region belonging to that button.
 //
-// Layout of one region — read off a real mouse that the vendor software had
-// written macros to, and cross-checked field by field against what its UI
-// displayed for them (docs/MACRO-PROTOCOL.md):
+// Layout of one region — recovered by static analysis of the vendor software's
+// encoder, then read off a real mouse that that software had written macros to
+// and cross-checked field by field against what its UI displayed for them.
+// Three fields came out of the disassembly wrong and were corrected by the
+// device: the press/release bits were inverted, the two loop modes were
+// swapped, and the checksum's coverage was too wide. This comment is the
+// surviving record of that work, so treat it as the specification:
 //
 //   0x00         length of the macro's name IN BYTES (UTF-16, so 2 per char)
 //   0x01..0x1e   the name, UTF-16LE, zero padded
