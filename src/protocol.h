@@ -372,14 +372,20 @@ std::vector<Packet> build_macro_packets(uint8_t proto_idx,
 // for protocol work. The two directions are checked against each other
 // offline: see the config round-trip in tests/regress.sh.
 //
-// The 16 entries at 0x0301 and up are NOT part of that. They address 16
-// regions of 384 bytes (stride 0x180) that read as erased flash, every byte
-// 0xFF, and nothing is known to live there. They are confirmed writable, and
-// the vendor software can store macros somewhere, but neither the storage
-// format nor the button action code that points at a macro has been
-// captured — so this tool has nothing to write there and nothing to decode.
-// --save skips them; --get still shows them, which is how you would check
-// whether something appeared after the vendor software wrote a macro.
+// The 16 entries at 0x0301 and up are NOT part of that. They are the macro
+// regions — one 384-byte region per button at MACRO_BASE + index*MACRO_STRIDE,
+// written by build_macro_packets() and pointed at by macro_action(). On a mouse
+// with no macros set they read as erased flash, every byte 0xFF.
+//
+// Note what these particular reads land on: the region starts at 0x0300 but the
+// table asks from 0x0301, so the ten bytes that come back are the macro's NAME,
+// not its events. The event count sits at 0x031f and the events at 0x0320, so
+// checking a stored macro's bytes means a read this table does not contain —
+// use --raw-send for that.
+//
+// --save skips them, because it can report that a button runs a macro (from the
+// action bytes) but cannot yet turn a region back into a spec string. --get
+// still walks them.
 //
 // Replies come from the MOUSE, not the receiver, so a wireless mouse lying
 // still answers late or not at all; see the polling budget in fetch_block().

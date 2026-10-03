@@ -394,8 +394,10 @@ m913-ctl --get 12          # read one block (0-68)
 ```
 
 `--get` is `--save` without the decoding, for protocol work. It also walks the
-16 regions of 384 bytes at `0x0301`+ that `--save` skips: they read as erased
-flash and nothing is known to live there.
+16 macro regions at `0x0301`+ that `--save` skips — one 384-byte region per
+button, reading as erased flash (`0xFF`) on a mouse with no macros set. Those
+reads land on a macro's name rather than its events, so checking stored events
+means a `--raw-send` read of `0x031f` and up.
 
 ## Development
 
@@ -420,24 +422,18 @@ the mouse holds a setup you care about. See [docs/TESTING.md](docs/TESTING.md)
 for what they cover, how to read the report dumps, and how to recover a mouse
 whose kernel driver was left detached.
 
-### Macros: not supported yet
+### Decoding USB captures
 
-The mouse has 16 regions of 384 bytes at `0x0301` that read as erased flash, and
-the vendor software can program macros, but neither the storage format nor the
-button action code that points at a macro is known. Both have to come from USB
-captures of the Windows software.
+[tools/decode-capture.py](tools/decode-capture.py) is the tool for protocol work
+here: it decodes a capture — or a `--get` dump — into addressed,
+checksum-verified writes, names the memory region each one lands in, and
+`--diff` shows which bytes two sessions differ by, which is how an unknown field
+gets isolated. The macro format was pinned down this way.
 
-If you have a Windows machine with the vendor software and can record USB
-traffic (USBPcap + Wireshark) while it programs a macro, that would unblock the
-feature — please open an issue. The two captures that matter most are the same
-button assigned to a plain key and then to a macro, which isolates the action
-code, and a macro of three left clicks, which shows the storage format.
-
-[tools/decode-capture.py](tools/decode-capture.py) does the analysis, and is
-useful for any protocol work here: it decodes a capture — or a `--get` dump —
-into addressed, checksum-verified writes, names the memory region each one
-lands in, and `--diff` shows which bytes two sessions differ by, which is how
-an unknown field gets isolated.
+What is still unmapped is the Compx revision (VID `3554`): its DPI and LED
+addressing is known, but macros and `--save` are Areson-only because nothing
+equivalent has been captured for it. Captures of the vendor software configuring
+a Compx M913 would unblock both — please open an issue if you can record some.
 
 ```bash
 python3 tools/decode-capture.py --diff before.pcapng after.pcapng
